@@ -66,7 +66,7 @@ The recommendation keyword filter is available under:
 ```text
 More → Settings → Library → Recommendations → Filter recommendation keywords
 ```
-<img width="915" height="1920" alt="beb3f017bf2b1eb884df7e3691187e1a" src="https://github.com/user-attachments/assets/f8a7f636-dd74-448f-8b03-9eef7c1118ca" />
+<img width="40%"alt="beb3f017bf2b1eb884df7e3691187e1a" src="https://github.com/user-attachments/assets/f8a7f636-dd74-448f-8b03-9eef7c1118ca" />
 
 Separate multiple terms with commas or new lines. Matching is case-insensitive:
 
