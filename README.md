@@ -52,6 +52,9 @@ Similar manga
 
 Chapter list
 ```
+<img width="912" height="1920" alt="a02f09db533941b74a014f973ec0e14a" src="https://github.com/user-attachments/assets/0e376816-e768-44af-a46d-6e26987c3849" />
+
+<img width="906" height="1920" alt="c066eb394c595d39ffb2fd51a5a7feef" src="https://github.com/user-attachments/assets/6ccbd283-f26a-4384-bdaf-270b1195b7ce" />
 
 4. Select a recommendation to open it through the source of the current manga. A same-named entry from another source is never substituted.
 5. Re-entering or refreshing the page starts a new quality-weighted sample. When enough candidates are available, recently unseen works are preferred.
@@ -61,6 +64,7 @@ The recommendation keyword filter is available under:
 ```text
 More → Settings → Library → Recommendations → Filter recommendation keywords
 ```
+<img width="915" height="1920" alt="beb3f017bf2b1eb884df7e3691187e1a" src="https://github.com/user-attachments/assets/f8a7f636-dd74-448f-8b03-9eef7c1118ca" />
 
 Separate multiple terms with commas or new lines. Matching is case-insensitive:
 
