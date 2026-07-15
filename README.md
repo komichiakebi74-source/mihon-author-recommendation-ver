@@ -52,9 +52,11 @@ Similar manga
 
 Chapter list
 ```
-<img width="912" height="1920" alt="a02f09db533941b74a014f973ec0e14a" src="https://github.com/user-attachments/assets/0e376816-e768-44af-a46d-6e26987c3849" />
+<p align="center">
+<img width="30%" alt="a02f09db533941b74a014f973ec0e14a" src="https://github.com/user-attachments/assets/0e376816-e768-44af-a46d-6e26987c3849" />
 
-<img width="906" height="1920" alt="c066eb394c595d39ffb2fd51a5a7feef" src="https://github.com/user-attachments/assets/6ccbd283-f26a-4384-bdaf-270b1195b7ce" />
+<img width="30%" alt="c066eb394c595d39ffb2fd51a5a7feef" src="https://github.com/user-attachments/assets/6ccbd283-f26a-4384-bdaf-270b1195b7ce" />
+</p>
 
 4. Select a recommendation to open it through the source of the current manga. A same-named entry from another source is never substituted.
 5. Re-entering or refreshing the page starts a new quality-weighted sample. When enough candidates are available, recently unseen works are preferred.
