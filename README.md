@@ -65,7 +65,7 @@ More → Settings → Library → Recommendations → Filter recommendation keyw
 Separate multiple terms with commas or new lines. Matching is case-insensitive:
 
 ```text
-AI, AI-generated, AI生成, 3D
+AI,AI-generated,3D
 ```
 
 ## How It Works
@@ -104,8 +104,6 @@ Author, artist, and explicitly labeled group/circle names are normalized with Un
 When a search result lacks creator metadata, the repository may fetch details within its request budget and validate the result. An item that cannot be confirmed as sharing a creator is not allowed into the creator row.
 
 ### Multilingual tags and scoring
-
-Tags are mapped to internal semantic identities instead of comparing display strings directly. Known aliases such as `爱情`, `愛情`, `恋愛`, and `romance` can therefore participate in the same comparison. Unknown tags are retained conservatively as source-native identities, so compatibility does not depend on every source using a fixed vocabulary.
 
 Up to four core tags are selected for the target manga, while remaining tags provide secondary evidence. Content scoring is driven mainly by target-core-tag coverage and also considers core-tag Jaccard overlap and secondary-tag matches. A candidate with many extra tags is therefore not unfairly penalized simply for having a larger tag set.
 
