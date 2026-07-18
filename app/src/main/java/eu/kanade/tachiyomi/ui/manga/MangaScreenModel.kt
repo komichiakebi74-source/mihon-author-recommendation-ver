@@ -36,6 +36,7 @@ import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.recommendation.MangaRecommendationRepository
 import eu.kanade.tachiyomi.data.recommendation.RecommendationMetadata
+import eu.kanade.tachiyomi.data.recommendation.RecommendationSourcePolicyStore
 import eu.kanade.tachiyomi.data.track.EnhancedTracker
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.source.Source
@@ -134,6 +135,7 @@ class MangaScreenModel(
     private val updateMangaFromRemote: UpdateMangaFromRemote = Injekt.get(),
     private val networkToLocalManga: NetworkToLocalManga = Injekt.get(),
     private val recommendationRepository: MangaRecommendationRepository = Injekt.get(),
+    private val recommendationSourcePolicyStore: RecommendationSourcePolicyStore = Injekt.get(),
     val snackbarHostState: SnackbarHostState = SnackbarHostState(),
 ) : StateScreenModel<MangaScreenModel.State>(State.Loading) {
 
@@ -142,9 +144,12 @@ class MangaScreenModel(
 
     private var recommendationJob: Job? = null
     private var recommendationRetryJob: Job? = null
+    private var recommendationPolicyJob: Job? = null
     private val recommendationJobLock = Any()
     private val recommendationRunMutex = Mutex()
     private var restartRecommendationsOnStart = false
+    private var recommendationEnabled: Boolean? = null
+    private var automaticRecommendationRetryCount = 0
     private val recommendationGeneration = AtomicLong()
     private var refreshJob: Job? = null
     private val refreshJobLock = Any()
@@ -157,7 +162,9 @@ class MangaScreenModel(
                 }
                 if (shouldRestart) fetchRecommendations()
             }
-            Lifecycle.Event.ON_STOP -> cancelRecommendationsForLifecycle()
+            Lifecycle.Event.ON_STOP -> cancelRecommendationsForLifecycle(
+                restartOnStart = !hasVisibleRecommendations(),
+            )
             Lifecycle.Event.ON_DESTROY -> {
                 cancelRecommendationsForLifecycle(restartOnStart = false)
                 synchronized(refreshJobLock) { refreshJob.also { refreshJob = null } }?.cancel()
@@ -274,6 +281,7 @@ class MangaScreenModel(
                     hideMissingChapters = libraryPreferences.hideMissingChapters.get(),
                 )
             }
+            observeRecommendationPolicy(manga.source)
 
             // Start observe tracking since it only needs mangaId
             observeTrackers()
@@ -311,6 +319,8 @@ class MangaScreenModel(
     override fun onDispose() {
         lifecycle.removeObserver(recommendationLifecycleObserver)
         cancelRecommendationsForLifecycle(restartOnStart = false)
+        recommendationPolicyJob?.cancel()
+        recommendationPolicyJob = null
         synchronized(refreshJobLock) { refreshJob.also { refreshJob = null } }?.cancel()
     }
 
@@ -360,14 +370,16 @@ class MangaScreenModel(
         val state = successState ?: return null
         try {
             return withUIContext {
-                val update = updateMangaFromRemote(
-                    source = state.source,
-                    manga = state.manga,
-                    fetchDetails = fetchDetails,
-                    fetchChapters = fetchChapters,
-                    manualFetch = manualFetch,
-                )
-                    .getOrThrow()
+                val update = recommendationRepository.observeSourceRefresh(state.source) {
+                    updateMangaFromRemote(
+                        source = state.source,
+                        manga = state.manga,
+                        fetchDetails = fetchDetails,
+                        fetchChapters = fetchChapters,
+                        manualFetch = manualFetch,
+                    )
+                        .getOrThrow()
+                }
 
                 if (manualFetch) {
                     downloadNewChapters(update.newChapters)
@@ -398,6 +410,7 @@ class MangaScreenModel(
         synchronized(recommendationJobLock) {
             recommendationRetryJob?.cancel()
             recommendationRetryJob = null
+            automaticRecommendationRetryCount = 0
         }
         startRecommendations(forceRefresh, mangaOverride)
     }
@@ -407,6 +420,10 @@ class MangaScreenModel(
         mangaOverride: Manga?,
     ) {
         val state = successState ?: return
+        if (!recommendationSourcePolicyStore.get(state.source.id).enabled) {
+            hideAndCancelRecommendations()
+            return
+        }
         if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
             synchronized(recommendationJobLock) { restartRecommendationsOnStart = true }
             return
@@ -452,7 +469,7 @@ class MangaScreenModel(
                                 identity.exposureKeys.any(sessionExcludedWorkKeys::contains)
                         }
                             .distinctRecommendationWorks(source.id)
-                            .take(MAX_RECOMMENDATION_RESULTS)
+                            .take(MAX_CREATOR_RECOMMENDATION_RESULTS)
                         val creatorIdentities = creatorWorks.map {
                             RecommendationMetadata.identity(source.id, it.toSManga())
                         }
@@ -471,7 +488,7 @@ class MangaScreenModel(
                                     }
                             }
                             .distinctRecommendationWorks(source.id)
-                            .take(MAX_RECOMMENDATION_RESULTS)
+                            .take(MAX_SIMILAR_RECOMMENDATION_RESULTS)
 
                         var accepted = false
                         synchronized(recommendationJobLock) {
@@ -479,7 +496,8 @@ class MangaScreenModel(
                                 if (
                                     generation != recommendationGeneration.get() ||
                                     current.manga.id != targetManga.id ||
-                                    current.source.id != source.id
+                                    current.source.id != source.id ||
+                                    !recommendationSourcePolicyStore.get(source.id).enabled
                                 ) {
                                     current
                                 } else {
@@ -490,11 +508,13 @@ class MangaScreenModel(
                                             previous = current.creatorWorks,
                                             fresh = creatorWorks,
                                             authoritative = rows.creatorAuthoritative,
+                                            maxResults = MAX_CREATOR_RECOMMENDATION_RESULTS,
                                         ),
                                         relatedManga = resolveRecommendationRow(
                                             previous = current.relatedManga,
                                             fresh = similarManga,
                                             authoritative = rows.similarAuthoritative,
+                                            maxResults = MAX_SIMILAR_RECOMMENDATION_RESULTS,
                                         ),
                                     )
                                 }
@@ -551,6 +571,11 @@ class MangaScreenModel(
         jobs.forEach(Job::cancel)
     }
 
+    private fun hasVisibleRecommendations(): Boolean {
+        val state = successState ?: return false
+        return !shouldRestartRecommendationsAfterStop(state.creatorWorks, state.relatedManga)
+    }
+
     private fun scheduleRecommendationRetry(
         retryAtMillis: Long?,
         generation: Long,
@@ -559,9 +584,14 @@ class MangaScreenModel(
     ) {
         retryAtMillis ?: return
         synchronized(recommendationJobLock) {
-            if (generation != recommendationGeneration.get()) {
+            if (
+                generation != recommendationGeneration.get() ||
+                automaticRecommendationRetryCount >= MAX_AUTOMATIC_RECOMMENDATION_RETRIES ||
+                !recommendationSourcePolicyStore.get(sourceId).enabled
+            ) {
                 return
             }
+            automaticRecommendationRetryCount += 1
             recommendationRetryJob?.cancel()
             recommendationRetryJob = screenModelScope.launch {
                 delay((retryAtMillis - System.currentTimeMillis()).coerceAtLeast(MIN_RETRY_DELAY_MILLIS))
@@ -571,12 +601,50 @@ class MangaScreenModel(
                         current != null &&
                         current.manga.id == targetMangaId &&
                         current.source.id == sourceId &&
+                        recommendationSourcePolicyStore.get(sourceId).enabled &&
                         lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
                     recommendationRetryJob = null
                     valid
                 }
                 if (shouldRetry) startRecommendations(forceRefresh = false, mangaOverride = null)
             }
+        }
+    }
+
+    private fun observeRecommendationPolicy(sourceId: Long) {
+        recommendationPolicyJob?.cancel()
+        recommendationPolicyJob = screenModelScope.launch {
+            recommendationSourcePolicyStore.changes(sourceId)
+                .distinctUntilChanged()
+                .collectLatest { policy ->
+                    val wasEnabled = recommendationEnabled
+                    recommendationEnabled = policy.enabled
+                    if (!policy.enabled) {
+                        hideAndCancelRecommendations()
+                    } else if (wasEnabled == false) {
+                        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                            fetchRecommendations()
+                        } else {
+                            synchronized(recommendationJobLock) {
+                                restartRecommendationsOnStart = true
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun hideAndCancelRecommendations() {
+        cancelRecommendationsForLifecycle(restartOnStart = false)
+        synchronized(recommendationJobLock) {
+            restartRecommendationsOnStart = false
+            automaticRecommendationRetryCount = 0
+        }
+        updateSuccessState {
+            it.copy(
+                creatorWorks = RecommendationRowState.Hidden,
+                relatedManga = RecommendationRowState.Hidden,
+            )
         }
     }
 
@@ -1557,8 +1625,10 @@ sealed class ChapterList {
     }
 }
 
-internal fun List<Manga>.toRecommendationState(): RecommendationRowState =
-    take(MAX_RECOMMENDATION_RESULTS)
+internal fun List<Manga>.toRecommendationState(
+    maxResults: Int = MAX_CREATOR_RECOMMENDATION_RESULTS,
+): RecommendationRowState =
+    take(maxResults)
         .takeIf(List<Manga>::isNotEmpty)
         ?.let(RecommendationRowState::Success)
         ?: RecommendationRowState.Hidden
@@ -1567,8 +1637,9 @@ internal fun resolveRecommendationRow(
     previous: RecommendationRowState,
     fresh: List<Manga>,
     authoritative: Boolean,
+    maxResults: Int = MAX_CREATOR_RECOMMENDATION_RESULTS,
 ): RecommendationRowState = when {
-    fresh.isNotEmpty() -> fresh.toRecommendationState()
+    fresh.isNotEmpty() -> fresh.toRecommendationState(maxResults)
     authoritative -> RecommendationRowState.Hidden
     else -> previous
 }
@@ -1611,5 +1682,15 @@ sealed interface RecommendationRowState {
     data class Success(val manga: List<Manga>) : RecommendationRowState
 }
 
-private const val MAX_RECOMMENDATION_RESULTS = 10
+private const val MAX_CREATOR_RECOMMENDATION_RESULTS = 10
+private const val MAX_SIMILAR_RECOMMENDATION_RESULTS = 10
 private const val MIN_RETRY_DELAY_MILLIS = 1_000L
+private const val MAX_AUTOMATIC_RECOMMENDATION_RETRIES = 1
+
+internal fun RecommendationRowState.hasRecommendations(): Boolean =
+    this is RecommendationRowState.Success && manga.isNotEmpty()
+
+internal fun shouldRestartRecommendationsAfterStop(
+    creatorWorks: RecommendationRowState,
+    relatedManga: RecommendationRowState,
+): Boolean = !creatorWorks.hasRecommendations() && !relatedManga.hasRecommendations()

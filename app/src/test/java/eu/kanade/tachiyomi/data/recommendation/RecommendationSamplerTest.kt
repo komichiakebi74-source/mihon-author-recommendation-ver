@@ -120,6 +120,38 @@ class RecommendationSamplerTest {
         assertEquals(listOf("fused", "diverse", "redundant"), result.map(SManga::url))
     }
 
+    @Test
+    fun `published cards stay pinned while later quality candidates append`() {
+        val priorities = mutableMapOf<String, Double>()
+        val random = java.util.Random(73L)
+        val initial = RecommendationSampler.sample(
+            candidates = (1..10).map { ranked("initial-$it", score = 0.70) },
+            maxResults = 10,
+            maxPoolSize = 40,
+            exposureSnapshot = RecommendationExposureSnapshot(emptyList()),
+            randomPriorities = priorities,
+            workKeys = { setOf(it.url) },
+            nextRandomDouble = random::nextDouble,
+        )
+        val expanded = RecommendationSampler.sample(
+            candidates = buildList {
+                (1..10).forEach { add(ranked("initial-$it", score = 0.70)) }
+                (1..10).forEach { add(ranked("later-$it", score = 0.95)) }
+            },
+            maxResults = 20,
+            maxPoolSize = 40,
+            exposureSnapshot = RecommendationExposureSnapshot(emptyList()),
+            randomPriorities = priorities,
+            pinnedWorkKeys = initial.map { setOf(it.url) },
+            workKeys = { setOf(it.url) },
+            nextRandomDouble = random::nextDouble,
+        )
+
+        assertEquals(initial.map(SManga::url), expanded.take(10).map(SManga::url))
+        assertEquals(20, expanded.size)
+        assertEquals((1..10).map { "later-$it" }.toSet(), expanded.drop(10).map(SManga::url).toSet())
+    }
+
     private fun sample(
         candidates: List<RankedSimilarCandidate>,
         recent: List<String>,

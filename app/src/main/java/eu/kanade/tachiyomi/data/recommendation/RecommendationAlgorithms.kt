@@ -1065,10 +1065,10 @@ internal object RecommendationRanking {
         val originalIndex = allTags.withIndex().associate { it.value to it.index }
         // A sparse local index must not make source-native tags unusable. Rank by information
         // value instead of putting every known (and often very broad) translated tag first.
+        // Every non-generic value came from an explicit source tag field or structured tag block.
+        // Unknown source-native values must remain eligible even before the local corpus has seen
+        // them; otherwise a new source or a newly introduced tag can never influence retrieval.
         val core = allTags
-            .filter { tag ->
-                RecommendationMetadata.isKnownGenre(tag) || (documentFrequency[tag] ?: 0) > 0
-            }
             .sortedWith(
                 compareByDescending<String> {
                     tagWeight(it, documentFrequency, documentCount) *
@@ -1139,11 +1139,8 @@ internal object RecommendationRanking {
             documentFrequency,
             documentCount,
         )
-        val reliableSecondaryTags = profile.secondaryTags.filterTo(linkedSetOf()) { tag ->
-            RecommendationMetadata.isKnownGenre(tag) || (documentFrequency[tag] ?: 0) >= 2
-        }
         val secondaryBonus = weightedCoverage(
-            reliableSecondaryTags,
+            profile.secondaryTags,
             candidateTags,
             documentFrequency,
             documentCount,
@@ -1218,14 +1215,13 @@ internal object RecommendationRanking {
             }
 
             val rrf = listOfNotNull(
-                candidate.evidence.sourceRelatedRank?.let { 1.0 / (RRF_K + it + 1.0) },
                 candidate.evidence.aniListRank?.let { 1.0 / (RRF_K + it + 1.0) },
                 candidate.evidence.genreSearchRank?.let { 0.8 / (RRF_K + it + 1.0) },
                 candidate.evidence.queryRank?.let { 0.5 / (RRF_K + it + 1.0) },
                 candidate.evidence.popularRank?.let { 0.25 / (RRF_K + it + 1.0) },
             ).sum()
             val normalizedRrf = (rrf / MAX_RRF).coerceIn(0.0, 1.0)
-            val content = if (profile.coreTags.isEmpty() && candidate.evidence.hasAuthoritativeEvidence) {
+            val content = if (profile.coreTags.isEmpty() && candidate.evidence.hasAniListEvidence) {
                 1.0
             } else {
                 rawContent
@@ -1271,7 +1267,7 @@ internal object RecommendationRanking {
         documentCount: Int,
         coverage: Double,
     ): Boolean {
-        if (evidence.hasAuthoritativeEvidence) return true
+        if (evidence.hasAniListEvidence) return true
 
         val strongRouteGenres = evidence.strongRouteGenres intersect profile.allTags
         if (strongRouteGenres.isNotEmpty()) {

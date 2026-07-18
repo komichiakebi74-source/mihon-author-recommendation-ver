@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">Mihon</string>
+    <string name="app_name" translatable="false">Mihon Recs</string>
 
     <!-- Generic strings -->
     <string name="on">On</string>
@@ -1068,4 +1068,15 @@
     <string name="pref_recommendation_filter_keywords">Filter recommendation keywords</string>
     <string name="pref_recommendation_filter_keywords_summary">Hide recommendations whose title, creator, tags, or description contain a listed term</string>
     <string name="pref_recommendation_filter_keywords_format">Format: separate terms with commas or new lines. Matching is case-insensitive. Example:\nAI, AI-generated, AI生成, 3D</string>
+    <string name="pref_recommendation_source_settings">Source recommendation settings</string>
+    <string name="pref_recommendation_source_settings_summary">Enable recommendations and set request rates for each source</string>
+    <string name="pref_recommendation_source_settings_info">These limits apply only to recommendation searches and verification. Browsing, manga details, chapters, reading, and covers are not affected.</string>
+    <string name="pref_recommendation_request_rate">Recommendation request rate</string>
+    <string name="pref_recommendation_rate_unlimited">Unlimited</string>
+    <string name="pref_recommendation_rate_4_per_second">4 requests per second</string>
+    <string name="pref_recommendation_rate_2_per_second">2 requests per second</string>
+    <string name="pref_recommendation_rate_1_per_second">1 request per second</string>
+    <string name="pref_recommendation_rate_1_per_2_seconds">1 request every 2 seconds</string>
+    <string name="pref_recommendation_rate_1_per_5_seconds">1 request every 5 seconds</string>
+    <string name="pref_recommendation_rate_1_per_10_seconds">1 request every 10 seconds</string>
 </resources>

@@ -320,7 +320,7 @@ class RecommendationRankingTest {
     }
 
     @Test
-    fun `tag profile limits scoring core and keeps source native provisional routes`() {
+    fun `tag profile limits scoring core and keeps source native routes`() {
         val identities = listOf(
             GenreIdentity("愛情", "romance"),
             GenreIdentity("校園", "school_life"),
@@ -360,8 +360,8 @@ class RecommendationRankingTest {
             documentFrequency = emptyMap(),
             documentCount = 0,
         )
-        assertTrue(provisionalOnly.coreTags.isEmpty())
-        assertEquals(setOf("native_one", "native_two"), provisionalOnly.secondaryTags)
+        assertEquals(setOf("native_one", "native_two"), provisionalOnly.coreTags)
+        assertTrue(provisionalOnly.secondaryTags.isEmpty())
         assertEquals(listOf("來源標籤一", "來源標籤二"), provisionalOnly.routeIdentities.map { it.displayName })
 
         val mixed = RecommendationRanking.tagProfile(
@@ -373,9 +373,9 @@ class RecommendationRankingTest {
             documentFrequency = emptyMap(),
             documentCount = 0,
         )
-        assertEquals(setOf("romance"), mixed.coreTags)
-        assertEquals(setOf("unseen_native"), mixed.secondaryTags)
-        assertEquals(listOf("Romance", "Unseen Native"), mixed.routeIdentities.map { it.displayName })
+        assertEquals(setOf("unseen_native", "romance"), mixed.coreTags)
+        assertTrue(mixed.secondaryTags.isEmpty())
+        assertEquals(listOf("Unseen Native", "Romance"), mixed.routeIdentities.map { it.displayName })
     }
 
     @Test
@@ -416,8 +416,8 @@ class RecommendationRankingTest {
         val score = RecommendationRanking.contentScore(
             profile = profile,
             candidateTags = candidateTags,
-            documentFrequency = profile.allTags.associateWith { 2 },
-            documentCount = 4,
+            documentFrequency = emptyMap(),
+            documentCount = 0,
         )
 
         val expected = 0.70 * 0.5 + 0.20 * (1.0 / 3.0) + 0.10 * 0.5
@@ -448,8 +448,8 @@ class RecommendationRankingTest {
             maxResults = 10,
         )
 
-        assertTrue(profile.coreTags.isEmpty())
-        assertEquals(setOf("來源自訂標籤"), profile.secondaryTags)
+        assertEquals(setOf("來源自訂標籤"), profile.coreTags)
+        assertTrue(profile.secondaryTags.isEmpty())
         assertEquals(listOf("verified-native"), result.map(RecommendationMetadata::safeUrl))
     }
 
@@ -514,10 +514,10 @@ class RecommendationRankingTest {
     }
 
     @Test
-    fun `zero tag targets require AniList or source related evidence`() {
+    fun `zero tag targets require AniList evidence`() {
         val candidates = listOf(
             SimilarCandidate(manga("popular", null), CandidateEvidence(popularRank = 0)),
-            SimilarCandidate(manga("related", null), CandidateEvidence(sourceRelatedRank = 0)),
+            SimilarCandidate(manga("related", null), CandidateEvidence(aniListRank = 0)),
         )
 
         val ranked = scoreMangaCandidates(

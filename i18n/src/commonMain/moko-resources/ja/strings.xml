@@ -866,4 +866,15 @@
     <string name="pref_recommendation_filter_keywords">おすすめの除外キーワード</string>
     <string name="pref_recommendation_filter_keywords_summary">タイトル、作者、タグ、説明にキーワードが含まれる作品を非表示にします</string>
     <string name="pref_recommendation_filter_keywords_format">形式：カンマまたは改行で区切ります。大文字と小文字は区別しません。例：\nAI, AI生成, AI-generated, 3D</string>
+    <string name="pref_recommendation_source_settings">ソース別おすすめ設定</string>
+    <string name="pref_recommendation_source_settings_summary">ソースごとにおすすめの有効化とリクエスト頻度を設定</string>
+    <string name="pref_recommendation_source_settings_info">頻度制限はおすすめの検索と結果確認にのみ適用されます。閲覧、作品詳細、チャプター、リーダー、表紙の読み込みには影響しません。</string>
+    <string name="pref_recommendation_request_rate">おすすめのリクエスト頻度</string>
+    <string name="pref_recommendation_rate_unlimited">制限なし</string>
+    <string name="pref_recommendation_rate_4_per_second">1 秒に 4 回</string>
+    <string name="pref_recommendation_rate_2_per_second">1 秒に 2 回</string>
+    <string name="pref_recommendation_rate_1_per_second">1 秒に 1 回</string>
+    <string name="pref_recommendation_rate_1_per_2_seconds">2 秒に 1 回</string>
+    <string name="pref_recommendation_rate_1_per_5_seconds">5 秒に 1 回</string>
+    <string name="pref_recommendation_rate_1_per_10_seconds">10 秒に 1 回</string>
 </resources>

@@ -113,7 +113,6 @@ internal data class TagProfile(
 
 internal data class CandidateEvidence(
     val aniListRank: Int? = null,
-    val sourceRelatedRank: Int? = null,
     val genreSearchRank: Int? = null,
     val queryRank: Int? = null,
     val popularRank: Int? = null,
@@ -124,16 +123,9 @@ internal data class CandidateEvidence(
     val hasAniListEvidence: Boolean
         get() = aniListRank != null
 
-    val hasSourceRelatedEvidence: Boolean
-        get() = sourceRelatedRank != null
-
-    val hasAuthoritativeEvidence: Boolean
-        get() = hasAniListEvidence || hasSourceRelatedEvidence
-
     fun merge(other: CandidateEvidence): CandidateEvidence {
         return CandidateEvidence(
             aniListRank = minRank(aniListRank, other.aniListRank),
-            sourceRelatedRank = minRank(sourceRelatedRank, other.sourceRelatedRank),
             genreSearchRank = minRank(genreSearchRank, other.genreSearchRank),
             queryRank = minRank(queryRank, other.queryRank),
             popularRank = minRank(popularRank, other.popularRank),

@@ -923,4 +923,15 @@
     <string name="pref_recommendation_filter_keywords">过滤推荐关键词</string>
     <string name="pref_recommendation_filter_keywords_summary">标题、作者、标签或简介包含关键词时不显示该推荐</string>
     <string name="pref_recommendation_filter_keywords_format">格式：使用逗号或换行分隔，不区分大小写。例如：\nAI, AI生成, AI-generated, 3D</string>
+    <string name="pref_recommendation_source_settings">来源推荐设置</string>
+    <string name="pref_recommendation_source_settings_summary">按来源开启推荐并设置推荐请求速率</string>
+    <string name="pref_recommendation_source_settings_info">速率限制仅作用于推荐搜索和结果验证，不影响浏览、漫画详情、章节、阅读和封面加载。</string>
+    <string name="pref_recommendation_request_rate">推荐请求速率</string>
+    <string name="pref_recommendation_rate_unlimited">不限制</string>
+    <string name="pref_recommendation_rate_4_per_second">每秒 4 次</string>
+    <string name="pref_recommendation_rate_2_per_second">每秒 2 次</string>
+    <string name="pref_recommendation_rate_1_per_second">每秒 1 次</string>
+    <string name="pref_recommendation_rate_1_per_2_seconds">每 2 秒 1 次</string>
+    <string name="pref_recommendation_rate_1_per_5_seconds">每 5 秒 1 次</string>
+    <string name="pref_recommendation_rate_1_per_10_seconds">每 10 秒 1 次</string>
 </resources>

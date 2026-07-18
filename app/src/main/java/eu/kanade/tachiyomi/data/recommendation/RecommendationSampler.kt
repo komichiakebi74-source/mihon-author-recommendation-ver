@@ -19,22 +19,39 @@ internal object RecommendationSampler {
         exposureSnapshot: RecommendationExposureSnapshot,
         sourceExposureSnapshot: RecommendationExposureSnapshot = exposureSnapshot,
         randomPriorities: MutableMap<String, Double>,
+        pinnedWorkKeys: List<Set<String>> = emptyList(),
         workKeys: (SManga) -> Set<String>,
         nextRandomDouble: () -> Double,
     ): List<SManga> {
         if (maxResults <= 0) return emptyList()
-        val pool = candidates.asSequence()
+        val qualified = candidates.asSequence()
             .filter { it.score >= MIN_QUALITY_SCORE }
             .sortedWith(
                 compareByDescending<RankedSimilarCandidate>(RankedSimilarCandidate::score)
                     .thenBy { RecommendationMetadata.safeUrl(it.manga) },
             )
-            .take(maxPoolSize)
             .toList()
+        if (qualified.isEmpty()) return emptyList()
+
+        fun matches(candidate: RankedSimilarCandidate, keys: Set<String>): Boolean =
+            keys.isNotEmpty() && workKeys(candidate.manga).any(keys::contains)
+
+        // Preserve cards already published by this observation while they still pass the current
+        // quality gate. Pins that become invalid after detail hydration are deliberately ignored.
+        val pinned = pinnedWorkKeys.mapNotNull { keys ->
+            qualified.firstOrNull { candidate -> matches(candidate, keys) }
+        }.distinct()
+        val pool = buildList {
+            addAll(pinned.take(maxPoolSize))
+            qualified.forEach { candidate ->
+                if (size < maxPoolSize && candidate !in this) add(candidate)
+            }
+        }
         if (pool.isEmpty()) return emptyList()
 
-        val selected = mutableListOf<RankedSimilarCandidate>()
-        val unseen = pool.filter { candidate ->
+        val selected = pinned.take(maxResults).toMutableList()
+        val selectedSet = selected.toHashSet()
+        val unseen = pool.filterNot(selectedSet::contains).filter { candidate ->
             val keys = workKeys(candidate.manga)
             exposureSnapshot.exposureIndex(keys) == null &&
                 sourceExposureSnapshot.exposureIndex(keys) == null
@@ -51,9 +68,9 @@ internal object RecommendationSampler {
             return selected.map(RankedSimilarCandidate::manga)
         }
 
-        val selectedSet = selected.toSet()
+        val selectedAfterUnseen = selected.toSet()
         val oldestSeen = pool.asSequence()
-            .filterNot(selectedSet::contains)
+            .filterNot(selectedAfterUnseen::contains)
             .mapNotNull { candidate ->
                 val keys = workKeys(candidate.manga)
                 listOfNotNull(

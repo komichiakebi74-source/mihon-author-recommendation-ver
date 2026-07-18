@@ -915,4 +915,15 @@
     <string name="pref_recommendation_filter_keywords">過濾推薦關鍵詞</string>
     <string name="pref_recommendation_filter_keywords_summary">標題、作者、標籤或簡介包含關鍵詞時不顯示該推薦</string>
     <string name="pref_recommendation_filter_keywords_format">格式：使用逗號或換行分隔，不區分大小寫。例如：\nAI, AI生成, AI-generated, 3D</string>
+    <string name="pref_recommendation_source_settings">來源推薦設定</string>
+    <string name="pref_recommendation_source_settings_summary">依來源啟用推薦並設定推薦請求速率</string>
+    <string name="pref_recommendation_source_settings_info">速率限制僅套用於推薦搜尋與結果驗證，不影響瀏覽、漫畫詳情、章節、閱讀及封面載入。</string>
+    <string name="pref_recommendation_request_rate">推薦請求速率</string>
+    <string name="pref_recommendation_rate_unlimited">不限制</string>
+    <string name="pref_recommendation_rate_4_per_second">每秒 4 次</string>
+    <string name="pref_recommendation_rate_2_per_second">每秒 2 次</string>
+    <string name="pref_recommendation_rate_1_per_second">每秒 1 次</string>
+    <string name="pref_recommendation_rate_1_per_2_seconds">每 2 秒 1 次</string>
+    <string name="pref_recommendation_rate_1_per_5_seconds">每 5 秒 1 次</string>
+    <string name="pref_recommendation_rate_1_per_10_seconds">每 10 秒 1 次</string>
 </resources>

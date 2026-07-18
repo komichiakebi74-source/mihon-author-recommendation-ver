@@ -31,6 +31,7 @@ It adds **More by the same creators** and **Similar manga** rows above the chapt
 - Uses quality-weighted random sampling and diversity re-ranking to reduce repetitive recommendation sets.
 - Uses source-scoped work identities to exclude the current manga, recently visited ancestors, cross-row duplicates, and alias URLs.
 - Includes a configurable recommendation keyword filter for titles, creators, tags, and descriptions.
+- Lets users disable recommendations or select a safe request rate independently for every installed online source.
 - Loads recommendations independently from manga details and chapters. Covers continue to use Mihon's native asynchronous image loading and cache.
 - Hides an individual row when the source does not expose enough reliable evidence, without showing loading, error, or retry placeholders.
 
@@ -68,6 +69,39 @@ Separate multiple terms with commas or new lines. Matching is case-insensitive:
 AI, AI-generated, AI生成, 3D
 ```
 
+Per-source controls are available under:
+
+```text
+More → Settings → Library → Recommendations → Source recommendation settings
+```
+
+### Per-source recommendation controls
+
+Every installed online source has an independent recommendation policy keyed by its stable `sourceId`. Local and stub sources are omitted from this screen.
+
+- **Enable recommendations:** Turns both recommendation rows on or off for that source. Disabling a source immediately cancels queued recommendation work, hides both rows, and prevents obsolete tasks from publishing results. Re-enabling it starts a fresh recommendation load for the current manga.
+- **Request rate:** Controls only network requests started by the recommendation repository. The first request is immediate. A configured interval serializes later recommendation requests for that source and spaces their start times evenly.
+
+| Preset | Minimum interval |
+| --- | ---: |
+| Unlimited (default) | No manual delay; up to two recommendation requests may run concurrently |
+| 4 requests per second | 250 ms |
+| 2 requests per second | 500 ms |
+| 1 request per second | 1,000 ms |
+| 1 request every 2 seconds | 2,000 ms |
+| 1 request every 5 seconds | 5,000 ms |
+| 1 request every 10 seconds | 10,000 ms |
+
+These controls never pace manga details, chapters, browsing, reading, WebView, downloads, or cover loading. Turning recommendations off does not disable any ordinary source feature.
+
+Rate-limit recovery is isolated by `sourceId`:
+
+- HTTP 429 stops new recommendation requests for the current pass while retaining already published cards.
+- A numeric or HTTP-date `Retry-After` value is authoritative. Without it, persisted backoff uses `15 s → 30 s → 60 s → 120 s → 300 s`, plus deterministic positive jitter of at most 20 percent.
+- Each manga page performs at most one automatic recovery attempt. A second 429 waits for a page revisit, manual refresh, or settings change instead of creating a retry loop.
+- When a 429 response exposes `X-RateLimit-Limit`, the scheduler learns a six-hour sliding-window profile and reserves approximately 25 percent of the reported quota for foreground source traffic. A larger authenticated quota therefore permits proportionally faster recommendations.
+- Changing a source's request-rate setting clears its learned quota profile so a newly configured API key or server policy can be learned again.
+
 ## How It Works
 
 The recommendation pipeline is divided into candidate generation, evidence validation, scoring, identity filtering, and diversity-aware sampling:
@@ -76,12 +110,10 @@ The recommendation pipeline is divided into candidate generation, evidence valid
 flowchart LR
     A["Current manga metadata"] --> B["Normalize creators and multilingual tags"]
     B --> C["Local same-source candidate pool"]
-    B --> D["Source filters / search / popular candidates"]
-    B --> E["Source-provided related data"]
+    B --> D["Source filters / target-derived search candidates"]
     B --> F["Existing AniList binding"]
     C --> G["Metadata validation and evidence merge"]
     D --> G
-    E --> G
     F --> G
     G --> H["Coverage + Jaccard + weighted RRF"]
     H --> I["Work identity and exposure filtering"]
@@ -91,11 +123,13 @@ flowchart LR
 
 ### Candidate generation
 
-Candidates are always generated within the current source boundary. The repository first reads locally known manga metadata for the same source, then selects from the source's structured filters, text search, or popular list according to the capabilities exposed by the extension. Popular results only expand the candidate pool; popularity alone is never treated as proof of similarity.
+Candidates are always generated within the current source boundary. The repository first reads locally known manga metadata for the same source, then selects from the source's structured filters or target-derived text search according to the capabilities exposed by the extension. A short row is not padded from the source's generic popular list.
 
 AniList community recommendations are used only when the current manga already has an AniList track binding. Its existing `remoteId` is queried, and every external result must then be mapped and validated against the current source. Titles are not sent to AniList for unbound manga.
 
-Reliable source-provided related data is treated as strong evidence. nHentai has a one-request related fast path that shares host-level pacing, cooldown, and backoff state. If that endpoint is unavailable, the repository can fall back to the generic same-source route.
+There are no provider-specific recommendation algorithms. Sources such as nHentai use the same capability-driven filter, search, validation, ranking, and sampling pipeline as every other source. The app does not call provider-specific unofficial related endpoints.
+
+Recommendation network work is scheduled per `sourceId`. An unlimited source keeps up to two recommendation requests in flight with no artificial first-request delay. Selecting a rate serializes only that source's recommendation requests and spaces their start times evenly. HTTP 429 recovery follows `Retry-After` when present, otherwise it uses persisted truncated exponential backoff; a cooldown never blocks a different source or ordinary manga requests.
 
 ### Creator matching
 
@@ -111,7 +145,7 @@ Up to four core tags are selected for the target manga, while remaining tags pro
 
 Evidence from multiple routes is merged using weighted reciprocal rank fusion (RRF). Candidates below the quality threshold never enter the random pool.
 
-When the target has no reliable tags, only strong evidence such as AniList recommendations or source-provided related data can qualify. Generic popular items are not presented as similar manga.
+When the target has no reliable tags, only an existing AniList recommendation binding can provide similarity evidence. Generic popular items are never presented as similar manga.
 
 ### Identity, deduplication, and quality-aware randomness
 
@@ -122,9 +156,12 @@ After the quality gate, candidates are sampled without replacement using `Secure
 ### Performance and request protection
 
 - Recommendation work is independent of chapter loading and can publish progressively.
-- Generic sources use at most two concurrent recommendation requests and have soft and hard deadlines.
-- Rate-sensitive sources use a smaller request budget, serialized requests, and a minimum interval between calls.
-- HTTP 429 responses are not immediately retried. `Retry-After` is honored when present; otherwise exponential backoff with jitter is applied.
+- Progressive rows are stable and capped at 10 cards. The first qualified cards keep their order while later work may only fill empty slots; returning from a recommended manga keeps the parent page's existing recommendation snapshot.
+- Unconfigured sources remain enabled and unlimited. They receive no artificial first-request delay and keep the normal recommendation concurrency limit of two.
+- Manually limited sources use cancellable FIFO pacing with recommendation concurrency reduced to one; time spent waiting extends the background quality deadline without blocking chapter loading.
+- HTTP 429 cooldowns, learned server quotas, manual request intervals, and exposure state remain isolated by `sourceId` and persist only where required for safe recovery.
+- Already qualified cards remain visible when a later route times out or receives HTTP 429; network recovery never replaces them with unrelated popular cards.
+- Scheduling changes neither candidate routes nor quality: each target retains the same 12-request ceiling, two core-tag routes, detail verification budget, quality thresholds, and sampling limits. The background deadline is extended so queued validation is not truncated.
 - Leaving the page, switching manga, or repeatedly refreshing cancels stale work so an old page cannot overwrite the new page's rows.
 - Detail metadata uses a bounded cache, while candidates and exposure history remain source-scoped.
 
@@ -146,8 +183,8 @@ Recommendation count, latency, and quality depend on the metadata and search cap
 Download the latest APK from [Releases](https://github.com/komichiakebi74-source/mihon-author-recommendation-ver/releases).
 
 - Requires Android 8.0 or newer.
-- Current test builds use the Android debug certificate and the package name `app.mihon.dev`.
-- A debug build can be installed alongside official Mihon, but it cannot replace the official `app.mihon` package.
+- Stable releases use the independent package name `app.mihon.recs` and the Mihon Recs project signing key.
+- Mihon Recs can be installed alongside official Mihon and debug builds. Use Mihon's backup and restore features to migrate data between package identities.
 - APKs distributed outside this repository are not guaranteed to correspond to this source tree.
 
 ## Building from Source
@@ -164,6 +201,8 @@ On Windows PowerShell:
 .\gradlew.bat :app:assembleDebug --no-daemon
 ```
 
+Signed release instructions, local keystore configuration, and GitHub Actions secrets are documented in [Releasing Mihon Recs](./docs/releasing.md).
+
 Before submitting changes, run the relevant checks:
 
 ```powershell
@@ -176,13 +215,13 @@ See Mihon's upstream [contributing guide](./CONTRIBUTING.md) for the full develo
 
 - Mihon's public Source API has no universal recommendations endpoint and does not guarantee creator, group, or structured-tag metadata. Both rows therefore cannot be guaranteed for every manga.
 - Initial cards can be published quickly, but real latency still depends on the extension, source server, network conditions, and rate limits.
-- The nHentai related route relies on a degradable, unofficial endpoint. Failures fall back when possible, while HTTP 429 responses trigger a cooldown to avoid repeatedly hitting the service.
+- Provider rate limits can still delay a complete row when a source extension needs multiple searches or detail requests. The current pass stops at a live cooldown instead of waiting inside the page; a later retry uses adaptive pacing to avoid recreating the same burst.
 - Multilingual aliases cover common semantics but cannot anticipate every private source vocabulary. Unknown formats are handled conservatively.
 - Recommendations use source-visible metadata and existing user bindings. Library or reading-history data is not uploaded to train an external recommendation model.
 
 ## Upstream and Contributions
 
-This project is based on [mihonapp/mihon](https://github.com/mihonapp/mihon). The generic recommendation infrastructure, UI, and source-specific adapters currently live in one fork. Before proposing the work upstream, it should be split into smaller independently reviewable changes, with source-specific capabilities abstracted behind optional interfaces or moved to the extension side.
+This project is based on [mihonapp/mihon](https://github.com/mihonapp/mihon). The recommendation infrastructure and UI currently live in one fork. Before proposing the work upstream, it should be split into smaller independently reviewable changes.
 
 Reproducible bug reports are welcome. A useful recommendation report includes:
 

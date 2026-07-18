@@ -30,10 +30,10 @@ android {
     namespace = "eu.kanade.tachiyomi"
 
     defaultConfig {
-        applicationId = "app.mihon"
+        applicationId = "app.mihon.recs"
 
         versionCode = 26
-        versionName = "0.20.1"
+        versionName = "0.20.1-recs.1"
 
         buildConfigField("String", "COMMIT_COUNT", "\"${getLatestCommitCount()}\"")
         buildConfigField("String", "COMMIT_SHA", "\"${getLatestCommitSha()}\"")
@@ -44,31 +44,31 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    if (System.getenv("MIHON_GITHUB_RELEASE").toBoolean()) {
-        val tempStoreFile = file(System.getenv("RUNNER_TEMP")).resolve("antsy.keystore")
+    val releaseSigningConfig = when {
+        System.getenv("MIHON_GITHUB_RELEASE").toBoolean() -> {
+            val tempStoreFile = file(System.getenv("RUNNER_TEMP")).resolve("mihon-recs.keystore")
+            val storeFileBytes = System.getenv("storeFileBase64").let(Base64::decode)
+            tempStoreFile.outputStream().use { it.write(storeFileBytes) }
 
-        val storeFileBytes = System.getenv("storeFileBase64").let(Base64::decode)
-        tempStoreFile.outputStream().use { it.write(storeFileBytes) }
-
-        signingConfigs {
-            named("debug") {
+            signingConfigs.create("release") {
                 storeFile = tempStoreFile
                 storePassword = System.getenv("storePassword")
                 keyAlias = System.getenv("keyAlias")
                 keyPassword = System.getenv("keyPassword")
             }
         }
-    } else if (keystorePropertiesFile.exists()) {
-        val keystoreProperties = FileInputStream(keystorePropertiesFile).use { Properties().apply { load(it) } }
-
-        signingConfigs {
-            named("debug") {
+        keystorePropertiesFile.exists() -> {
+            val keystoreProperties = FileInputStream(keystorePropertiesFile).use {
+                Properties().apply { load(it) }
+            }
+            signingConfigs.create("release") {
                 storeFile = file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
             }
         }
+        else -> null
     }
 
     buildTypes {
@@ -81,7 +81,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
 
-            signingConfig = debug.signingConfig
+            signingConfig = releaseSigningConfig
 
             isProfileable = true
 

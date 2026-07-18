@@ -31,9 +31,13 @@ import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.manga.model.Manga
 import java.net.URI
 import java.security.SecureRandom
+import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class MangaRecommendationRepository internal constructor(
     private val localCandidateLoader: suspend (sourceId: Long, excludedUrl: String) -> List<Manga>,
@@ -42,12 +46,13 @@ class MangaRecommendationRepository internal constructor(
     private val monotonicNowNanos: () -> Long = System::nanoTime,
     private val onSourceRequest: (String) -> Unit = {},
     private val random: java.util.Random = SecureRandom(),
-    private val nhentaiRelatedProvider: NhentaiRelatedProvider = DefaultNhentaiRelatedProvider(),
     private val exposureStore: RecommendationExposureStore = RecommendationExposureStore(now = now),
-    private val requestCoordinator: RecommendationRequestCoordinator =
-        RecommendationRequestCoordinator(monotonicNowNanos = monotonicNowNanos),
-    private val relatedCache: RelatedRecommendationCache = RelatedRecommendationCache(),
+    private val requestScheduler: RecommendationRequestScheduler = RecommendationRequestScheduler(),
+    private val sourcePolicyProvider: (Long) -> RecommendationSourcePolicy = { RecommendationSourcePolicy() },
     private val recommendationFilterProvider: () -> String = { "" },
+    private val awaitProgressiveCardFrame: suspend () -> Unit = {
+        delay(PROGRESSIVE_CARD_INTERVAL_MS)
+    },
 ) {
 
     private val detailCache = DetailCache()
@@ -55,6 +60,38 @@ class MangaRecommendationRepository internal constructor(
 
     @Volatile
     private var keywordFilterCache: Pair<String, List<String>>? = null
+
+    /**
+     * Observes details/chapters traffic without putting page-critical work behind recommendation
+     * pacing or cooldowns. A real 429 is still shared with recommendation requests so background
+     * work backs off, while the source remains responsible for its own foreground request policy.
+     */
+    internal suspend fun <T> observeSourceRefresh(
+        source: Source,
+        block: suspend () -> T,
+    ): T {
+        requestScheduler.prepare(source.id, now())
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (e.isRecommendationRateLimited()) {
+                requestScheduler.recordRateLimit(
+                    sourceId = source.id,
+                    nowMillis = now(),
+                    retryAfterMillis = e.recommendationRetryAfterMillis(now()),
+                    serverRequestLimit = e.recommendationRateLimit(),
+                )
+                logcat(LogPriority.WARN, e) { "Manga source refresh received HTTP 429" }
+            }
+            throw e
+        }
+    }
+
+    internal fun resetLearnedRateProfile(sourceId: Long) {
+        requestScheduler.resetLearnedRateProfile(sourceId)
+    }
 
     internal fun observeRecommendations(
         source: Source,
@@ -65,15 +102,18 @@ class MangaRecommendationRepository internal constructor(
         sessionExcludedWorkKeys: Set<String> = emptySet(),
     ): Flow<RecommendationRows> = channelFlow {
         val currentUrl = RecommendationMetadata.safeUrl(manga)
-        if (currentUrl.isBlank() || source.isLocalOrStub()) {
+        if (currentUrl.isBlank() || source.isLocalOrStub() || !sourcePolicyProvider(source.id).enabled) {
             send(
                 RecommendationRows(
                     creatorAuthoritative = true,
                     similarAuthoritative = true,
+                    isFinal = true,
                 ),
             )
             return@channelFlow
         }
+
+        requestScheduler.prepare(source.id, now())
 
         val databasePool = try {
             localCandidateLoader(source.id, currentUrl)
@@ -112,74 +152,74 @@ class MangaRecommendationRepository internal constructor(
         )
         val exposureSnapshot = exposureStore.snapshot(source.id, targetExposureKey)
         val sourceExposureSnapshot = exposureStore.snapshot(source.id)
-        val nhentaiRelatedTarget = nhentaiRelatedProvider.resolve(source, manga)
-        val isRateSensitive = nhentaiRelatedTarget != null
-        val requestKey = nhentaiRelatedTarget
-            ?.let { "host:${it.hostKey}" }
-            ?: "source:${source.id}"
-        val queueCooldownAtStart = if (isRateSensitive) {
-            requestCoordinator.queueCooldownUntil(requestKey, now())
-        } else {
-            null
-        }
         // Start blank. UI rows appear only after a current-source query produces verified cards.
         // Coil still loads each card's cover independently after the card is composed.
         var rows = RecommendationRows()
         send(rows.forSession(source.id, sessionExcludedUrls, sessionExcludedWorkKeys))
 
         val stateMutex = Mutex()
+        var hasPublishedVisibleCard = false
         suspend fun publish(transform: (RecommendationRows) -> RecommendationRows) {
             stateMutex.withLock {
-                rows = transform(rows)
-                val visibleRows = rows.forSession(source.id, sessionExcludedUrls, sessionExcludedWorkKeys)
+                if (!sourcePolicyProvider(source.id).enabled) {
+                    rows = RecommendationRows(
+                        creatorAuthoritative = true,
+                        similarAuthoritative = true,
+                        isFinal = true,
+                    )
+                    send(rows)
+                    return@withLock
+                }
+                val previousVisibleRows = rows.forSession(
+                    source.id,
+                    sessionExcludedUrls,
+                    sessionExcludedWorkKeys,
+                )
+                val nextRows = transform(rows)
+                val visibleRows = nextRows.forSession(
+                    source.id,
+                    sessionExcludedUrls,
+                    sessionExcludedWorkKeys,
+                )
+                val previousVisibleCardCount =
+                    previousVisibleRows.creatorWorks.size + previousVisibleRows.similarManga.size
+                val visibleCardCount = visibleRows.creatorWorks.size + visibleRows.similarManga.size
+                val addedVisibleCard = visibleCardCount > previousVisibleCardCount
+                if (addedVisibleCard && hasPublishedVisibleCard) {
+                    awaitProgressiveCardFrame()
+                }
+                rows = nextRows
                 send(visibleRows)
+                if (addedVisibleCard) hasPublishedVisibleCard = true
             }
         }
 
+        val pacingDeadlineAllowanceMillis = requestScheduler.qualityDeadlineAllowanceMillis(
+            sourceId = source.id,
+            minRequestIntervalMillis = sourcePolicyProvider(source.id).minRequestIntervalMillis,
+            nowMillis = now(),
+        )
+
         val requestBudget = SourceRequestBudget(
-            maxRequests = if (isRateSensitive) {
-                MAX_RATE_SENSITIVE_SOURCE_REQUESTS
-            } else {
-                MAX_SOURCE_REQUESTS
-            },
-            semaphore = requestCoordinator.semaphore(
-                requestKey = requestKey,
-                maxConcurrency = if (isRateSensitive) 1 else MAX_SOURCE_CONCURRENCY,
+            maxRequests = MAX_SOURCE_REQUESTS,
+            semaphore = requestScheduler.semaphore(
+                sourceId = source.id,
+                maxConcurrency = MAX_SOURCE_CONCURRENCY,
             ),
             maxTextFilterRoutes = when {
-                isRateSensitive -> MAX_RATE_SENSITIVE_TEXT_FILTER_ROUTES
                 targetGenres.isEmpty() && aniListId == null -> MAX_CREATOR_ONLY_TEXT_FILTER_ROUTES
                 else -> MAX_TEXT_FILTER_ROUTES
             },
-            isRateSensitive = isRateSensitive,
             onRequest = onSourceRequest,
-            softDeadlineNanos = monotonicNowNanos() + SOFT_TIMEOUT_MS * NANOS_PER_MILLISECOND,
+            softDeadlineNanos = monotonicNowNanos() +
+                (SOFT_TIMEOUT_MS + pacingDeadlineAllowanceMillis) * NANOS_PER_MILLISECOND,
             monotonicNowNanos = monotonicNowNanos,
-            paceRequest = {
-                requestCoordinator.pace(
-                    requestKey = requestKey,
-                    minimumIntervalMillis = if (isRateSensitive) RATE_SENSITIVE_REQUEST_INTERVAL_MS else 0L,
-                )
-            },
-            isRateLimitedExternally = {
-                requestCoordinator.sourceCooldownUntil(requestKey, now()) != null ||
-                    (isRateSensitive && requestCoordinator.queueCooldownUntil(requestKey, now()) != null)
-            },
+            nowMillis = now,
+            requestScheduler = requestScheduler,
+            sourceId = source.id,
+            sourcePolicyProvider = sourcePolicyProvider,
             rateLimitRetryAt = {
-                requestCoordinator.sourceCooldownUntil(requestKey, now())
-                    ?: requestCoordinator.queueCooldownUntil(requestKey, now())
-            },
-            onRateLimited = {
-                if (nhentaiRelatedTarget != null) {
-                    val retryAt = requestCoordinator.recordRelatedRateLimit(
-                        hostKey = nhentaiRelatedTarget.hostKey,
-                        nowMillis = now(),
-                        retryAfterMillis = null,
-                    )
-                    requestCoordinator.blockSourceUntil(requestKey, retryAt)
-                } else {
-                    requestCoordinator.blockSourceFor(requestKey, now(), SOURCE_RATE_LIMIT_COOLDOWN_MS)
-                }
+                requestScheduler.sourceCooldownUntil(source.id, now())
             },
         )
         val detailBudget = SharedDetailBudget(
@@ -187,11 +227,10 @@ class MangaRecommendationRepository internal constructor(
             reservedPerRow = RESERVED_DETAILS_PER_ROW,
         )
         val similarNetworkComplete = CompletableDeferred<Unit>()
-        val prioritizeSimilarRequests = isRateSensitive ||
-            targetTagProfile.allTags.isNotEmpty() ||
+        val prioritizeSimilarRequests = targetTagProfile.allTags.isNotEmpty() ||
             aniListId != null
 
-        val completedWithinDeadline = withTimeoutOrNull(HARD_TIMEOUT_MS) {
+        withTimeoutOrNull((HARD_TIMEOUT_MS + pacingDeadlineAllowanceMillis).coerceAtMost(MAX_HARD_TIMEOUT_MS)) {
             supervisorScope {
                 val creatorJob = launch {
                     try {
@@ -216,16 +255,36 @@ class MangaRecommendationRepository internal constructor(
                             }
                             .distinctWorks(source.id)
                             .take(MAX_INTERNAL_RESULTS)
-                        publish { current ->
-                            val creatorUrls = combined.mapTo(hashSetOf(), ::recommendationKey)
-                            val filteredSimilar = current.similarManga.filterNot {
-                                recommendationKey(it) in creatorUrls
+                        // Publish verified works one at a time. Once a card is visible during this
+                        // run it is never replaced or reordered by a later response.
+                        combined.forEach { creatorCandidate ->
+                            publish { current ->
+                                val creatorIdentity = RecommendationMetadata.identity(source.id, creatorCandidate)
+                                val alreadyVisible = current.creatorWorks.any {
+                                    RecommendationMetadata.sameWork(
+                                        RecommendationMetadata.identity(source.id, it),
+                                        creatorIdentity,
+                                    )
+                                }
+                                val visibleInSimilar = current.similarManga.any {
+                                    RecommendationMetadata.sameWork(
+                                        RecommendationMetadata.identity(source.id, it),
+                                        creatorIdentity,
+                                    )
+                                }
+                                if (
+                                    alreadyVisible ||
+                                    visibleInSimilar ||
+                                    current.creatorWorks.size >= MAX_DISPLAY_RESULTS
+                                ) {
+                                    current
+                                } else {
+                                    current.copy(creatorWorks = current.creatorWorks + creatorCandidate)
+                                }
                             }
-                            current.copy(
-                                creatorWorks = combined,
-                                creatorAuthoritative = networkCreator.complete,
-                                similarManga = filteredSimilar,
-                            )
+                        }
+                        publish { current ->
+                            current.copy(creatorAuthoritative = networkCreator.complete)
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -254,16 +313,32 @@ class MangaRecommendationRepository internal constructor(
                             requestBudget = requestBudget,
                             detailBudget = detailBudget,
                             forceRefresh = forceRefresh,
-                            relatedTarget = nhentaiRelatedTarget,
-                            requestKey = requestKey,
                             onPartial = { partial ->
                                 publish { current ->
-                                    val creatorUrls = current.creatorWorks
-                                        .mapTo(hashSetOf(), ::recommendationKey)
+                                    val creatorIdentities = current.creatorWorks.map {
+                                        RecommendationMetadata.identity(source.id, it)
+                                    }
+                                    val additions = partial.filterNot { similarCandidate ->
+                                        val similarIdentity = RecommendationMetadata.identity(
+                                            source.id,
+                                            similarCandidate,
+                                        )
+                                        creatorIdentities.any { creatorIdentity ->
+                                            RecommendationMetadata.sameWork(creatorIdentity, similarIdentity)
+                                        }
+                                    }
+                                        .filterNot { similarCandidate ->
+                                            val identity = RecommendationMetadata.identity(source.id, similarCandidate)
+                                            current.similarManga.any {
+                                                RecommendationMetadata.sameWork(
+                                                    RecommendationMetadata.identity(source.id, it),
+                                                    identity,
+                                                )
+                                            }
+                                        }
                                     current.copy(
-                                        similarManga = partial
-                                            .filterNot { recommendationKey(it) in creatorUrls }
-                                            .take(MAX_INTERNAL_RESULTS),
+                                        similarManga = (current.similarManga + additions)
+                                            .take(MAX_DISPLAY_RESULTS),
                                         similarAuthoritative = false,
                                     )
                                 }
@@ -271,12 +346,27 @@ class MangaRecommendationRepository internal constructor(
                         )
                         val combined = networkSimilar.manga.take(MAX_INTERNAL_RESULTS)
                         publish { current ->
-                            val creatorUrls = current.creatorWorks.mapTo(hashSetOf(), ::recommendationKey)
-                            val displayedSimilar = combined
-                                .filterNot { recommendationKey(it) in creatorUrls }
-                                .take(MAX_INTERNAL_RESULTS)
+                            val creatorIdentities = current.creatorWorks.map {
+                                RecommendationMetadata.identity(source.id, it)
+                            }
+                            val additions = combined.filterNot { similarCandidate ->
+                                val similarIdentity = RecommendationMetadata.identity(source.id, similarCandidate)
+                                creatorIdentities.any { creatorIdentity ->
+                                    RecommendationMetadata.sameWork(creatorIdentity, similarIdentity)
+                                }
+                            }
+                                .filterNot { similarCandidate ->
+                                    val identity = RecommendationMetadata.identity(source.id, similarCandidate)
+                                    current.similarManga.any {
+                                        RecommendationMetadata.sameWork(
+                                            RecommendationMetadata.identity(source.id, it),
+                                            identity,
+                                        )
+                                    }
+                                }
                             current.copy(
-                                similarManga = displayedSimilar,
+                                similarManga = (current.similarManga + additions)
+                                    .take(MAX_DISPLAY_RESULTS),
                                 similarAuthoritative = networkSimilar.complete,
                                 retryAtMillis = networkSimilar.retryAtMillis,
                             )
@@ -295,43 +385,11 @@ class MangaRecommendationRepository internal constructor(
 
                 joinAll(creatorJob, similarJob)
             }
-            true
-        } ?: false
+        }
         publish { current ->
             val sourceRetryAt = requestBudget.retryAtMillis()
-            val relatedRetryAt = if (current.similarManga.size < MAX_DISPLAY_RESULTS) {
-                nhentaiRelatedTarget?.let { target ->
-                    listOfNotNull(
-                        requestCoordinator.relatedCooldownUntil(target.hostKey, now()),
-                        relatedCache.negativeCacheUntil(target.cacheKey, now()),
-                    ).maxOrNull()
-                }
-            } else {
-                null
-            }
-            val needsQueueRecovery = !completedWithinDeadline ||
-                (!current.similarAuthoritative && sourceRetryAt == null && relatedRetryAt == null)
-            if (
-                isRateSensitive &&
-                completedWithinDeadline &&
-                current.similarAuthoritative &&
-                queueCooldownAtStart == null
-            ) {
-                requestCoordinator.recordQueueSuccess(requestKey)
-            }
-            val queueRetryAt = when {
-                !isRateSensitive || current.similarManga.size >= MAX_DISPLAY_RESULTS -> null
-                needsQueueRecovery -> requestCoordinator.recordQueueTimeout(requestKey, now())
-                else -> requestCoordinator.queueCooldownUntil(requestKey, now())
-            }
             current.copy(
-                // A source cooldown blocks every route and therefore takes precedence. Related
-                // and queue deadlines describe independent recovery opportunities; use the first.
-                retryAtMillis = sourceRetryAt ?: listOfNotNull(
-                    current.retryAtMillis,
-                    relatedRetryAt,
-                    queueRetryAt,
-                ).minOrNull(),
+                retryAtMillis = sourceRetryAt ?: current.retryAtMillis,
                 isFinal = true,
             )
         }
@@ -481,22 +539,25 @@ class MangaRecommendationRepository internal constructor(
         requestBudget: SourceRequestBudget,
         detailBudget: SharedDetailBudget,
         forceRefresh: Boolean,
-        relatedTarget: NhentaiRelatedTarget?,
-        requestKey: String,
         onPartial: suspend (List<SManga>) -> Unit,
     ): RowLoadOutcome {
         val complete = AtomicBoolean(true)
-        var hasQualifiedRelatedCandidates = false
         val currentUrl = RecommendationMetadata.safeUrl(manga)
         val sourceExposureRound = sourceExposureSnapshot.leastRecentlyShownWorksFirst.size / MAX_DISPLAY_RESULTS
         val routingSeed = "$currentUrl|$sourceExposureRound"
         val localByUrl = localPool.associateBy(::recommendationKey)
         val candidates = linkedMapOf<String, SimilarCandidate>()
         val randomPriorities = mutableMapOf<String, Double>()
+        val publishedCandidates = mutableListOf<SManga>()
         val targetIdentity = RecommendationMetadata.identity(source.id, manga)
         val routeGenres = tagProfile.routeIdentities
             .mapTo(linkedSetOf(), GenreIdentity::normalizedName)
         val excludedUrlValues = excludedUrls.filter(String::isNotBlank)
+        fun workKeys(item: SManga): Set<String> =
+            RecommendationMetadata.identity(source.id, item).let { identity ->
+                identity.exposureKeys.ifEmpty { setOf(identity.exposureKey) }
+            }
+
         fun rankCandidates(): List<SManga> {
             val ranked = RecommendationRanking.scoreCandidates(
                 profile = tagProfile,
@@ -526,182 +587,44 @@ class MangaRecommendationRepository internal constructor(
                 exposureSnapshot = exposureSnapshot,
                 sourceExposureSnapshot = sourceExposureSnapshot,
                 randomPriorities = randomPriorities,
-                workKeys = {
-                    RecommendationMetadata.identity(source.id, it).let { identity ->
-                        identity.exposureKeys.ifEmpty { setOf(identity.exposureKey) }
-                    }
-                },
+                pinnedWorkKeys = publishedCandidates.map(::workKeys),
+                workKeys = ::workKeys,
                 nextRandomDouble = random::nextDouble,
             )
         }
 
-        fun relatedRecoveryAtMillis(): Long? = relatedTarget?.let { target ->
-            listOfNotNull(
-                requestCoordinator.relatedCooldownUntil(target.hostKey, now()),
-                relatedCache.negativeCacheUntil(target.cacheKey, now()),
-            ).maxOrNull()
-        }
-
-        fun retryAtMillis(): Long? = requestBudget.retryAtMillis() ?: relatedRecoveryAtMillis()
-
-        fun recordRelatedTransientCooldown() {
-            val target = relatedTarget ?: return
-            val retryAt = requestCoordinator.recordRelatedTransientFailure(target.hostKey, now())
-            requestCoordinator.blockSourceUntil(requestKey, retryAt)
-        }
-
-        if (relatedTarget != null) {
-            val sourceCooldown = requestBudget.retryAtMillis()
-            val relatedCooldown = requestCoordinator.relatedCooldownUntil(relatedTarget.hostKey, now())
-            val cacheCooldown = listOfNotNull(sourceCooldown, relatedCooldown).maxOrNull()
-            val freshCached = if (forceRefresh) {
-                null
-            } else {
-                relatedCache.getFresh(relatedTarget.cacheKey, now())
-            }
-            val staleCached = if (freshCached == null && cacheCooldown != null) {
-                relatedCache.getStale(relatedTarget.cacheKey, now())
-            } else {
-                null
-            }
-            val cachedRelated = freshCached ?: staleCached
-            val isStaleCache = staleCached != null
-            if (isStaleCache || (cachedRelated == null && cacheCooldown != null)) complete.set(false)
-            when (
-                val related = when {
-                    cachedRelated != null -> NhentaiRelatedOutcome.Success(cachedRelated)
-                    cacheCooldown != null -> null
-                    else -> {
-                        val outcome = requestBudget.call(
-                            name = "source-related",
-                            allowAfterSoftDeadline = true,
-                            onFailure = { complete.set(false) },
-                        ) {
-                            val cachedAfterQueue = if (forceRefresh) {
-                                null
-                            } else {
-                                relatedCache.getFresh(relatedTarget.cacheKey, now())
-                            }
-                            if (cachedAfterQueue != null) {
-                                NhentaiRelatedOutcome.Success(cachedAfterQueue)
-                            } else if (
-                                requestCoordinator.relatedCooldownUntil(relatedTarget.hostKey, now()) != null
-                            ) {
-                                null
-                            } else {
-                                nhentaiRelatedProvider.load(relatedTarget).also { result ->
-                                    when (result) {
-                                        is NhentaiRelatedOutcome.Success -> {
-                                            requestCoordinator.recordRelatedSuccess(relatedTarget.hostKey)
-                                            relatedCache.put(relatedTarget.cacheKey, result.manga, now())
-                                        }
-                                        is NhentaiRelatedOutcome.RateLimited -> {
-                                            val retryAt = requestCoordinator.recordRelatedRateLimit(
-                                                hostKey = relatedTarget.hostKey,
-                                                nowMillis = now(),
-                                                retryAfterMillis = result.retryAfter?.inWholeMilliseconds,
-                                            )
-                                            requestCoordinator.blockSourceUntil(requestKey, retryAt)
-                                        }
-                                        is NhentaiRelatedOutcome.HttpFailure -> {
-                                            when (result.classification) {
-                                                NhentaiHttpFailureClassification.CAPABILITY_UNAVAILABLE -> {
-                                                    requestCoordinator.recordRelatedUnavailable(
-                                                        relatedTarget.hostKey,
-                                                        now(),
-                                                    )
-                                                }
-                                                NhentaiHttpFailureClassification.TRANSIENT,
-                                                NhentaiHttpFailureClassification.OTHER,
-                                                -> recordRelatedTransientCooldown()
-                                            }
-                                        }
-                                        is NhentaiRelatedOutcome.InvalidResponse,
-                                        is NhentaiRelatedOutcome.NetworkFailure,
-                                        -> recordRelatedTransientCooldown()
-                                        NhentaiRelatedOutcome.Unsupported -> Unit
-                                    }
-                                }
-                            }
-                        }
-                        if (
-                            outcome == null &&
-                            requestBudget.retryAtMillis() == null &&
-                            requestCoordinator.relatedCooldownUntil(relatedTarget.hostKey, now()) == null
-                        ) {
-                            // Budget/transport timeouts are otherwise indistinguishable from an
-                            // unsupported response and would leave the page permanently empty.
-                            recordRelatedTransientCooldown()
-                        }
-                        outcome
-                    }
-                }
-            ) {
-                is NhentaiRelatedOutcome.Success -> {
-                    related.manga.take(MAX_SOURCE_RESULT_SAMPLE).forEachIndexed { index, item ->
-                        mergeCandidate(
-                            candidates = candidates,
-                            manga = item,
-                            evidence = CandidateEvidence(
-                                sourceRelatedRank = index,
-                                externalGenres = RecommendationMetadata.extractGenres(item),
-                            ),
-                            currentUrl = currentUrl,
-                            sourceId = source.id,
-                        )
-                    }
-                    val partial = rankCandidates()
-                    hasQualifiedRelatedCandidates = partial.isNotEmpty()
-                    if (partial.isNotEmpty()) onPartial(partial)
-                    if (partial.size >= MAX_DISPLAY_RESULTS) {
-                        return RowLoadOutcome(
-                            manga = partial,
-                            complete = !isStaleCache,
-                            retryAtMillis = cacheCooldown.takeIf { isStaleCache },
-                        )
-                    }
-                }
-                is NhentaiRelatedOutcome.RateLimited -> {
-                    requestBudget.stopCurrentRunForRateLimit()
-                    complete.set(false)
-                    val stale = relatedCache.getStale(relatedTarget.cacheKey, now()).orEmpty()
-                    if (stale.isNotEmpty()) {
-                        stale.take(MAX_SOURCE_RESULT_SAMPLE).forEachIndexed { index, item ->
-                            mergeCandidate(
-                                candidates = candidates,
-                                manga = item,
-                                evidence = CandidateEvidence(
-                                    sourceRelatedRank = index,
-                                    externalGenres = RecommendationMetadata.extractGenres(item),
-                                ),
-                                currentUrl = currentUrl,
-                                sourceId = source.id,
-                            )
-                        }
-                        return RowLoadOutcome(
-                            manga = rankCandidates(),
-                            complete = false,
-                            retryAtMillis = retryAtMillis(),
-                        )
-                    }
-                    return RowLoadOutcome(
-                        emptyList(),
-                        complete = false,
-                        retryAtMillis = retryAtMillis(),
+        fun appendPublishedCandidates(latest: List<SManga>): List<List<SManga>> {
+            if (publishedCandidates.size >= MAX_DISPLAY_RESULTS) return emptyList()
+            val snapshots = mutableListOf<List<SManga>>()
+            latest.forEach { candidate ->
+                if (publishedCandidates.size >= MAX_DISPLAY_RESULTS) return@forEach
+                val candidateIdentity = RecommendationMetadata.identity(source.id, candidate)
+                val alreadyPublished = publishedCandidates.any {
+                    RecommendationMetadata.sameWork(
+                        RecommendationMetadata.identity(source.id, it),
+                        candidateIdentity,
                     )
                 }
-                is NhentaiRelatedOutcome.HttpFailure -> complete.set(false)
-                is NhentaiRelatedOutcome.InvalidResponse -> complete.set(false)
-                is NhentaiRelatedOutcome.NetworkFailure -> complete.set(false)
-                NhentaiRelatedOutcome.Unsupported,
-                null,
-                -> Unit
+                if (!alreadyPublished) {
+                    publishedCandidates += candidate
+                    snapshots += publishedCandidates.toList()
+                }
+            }
+            return snapshots
+        }
+
+        suspend fun publishRankedCandidates() {
+            appendPublishedCandidates(rankCandidates()).forEach { snapshot ->
+                onPartial(snapshot)
             }
         }
 
+        fun retryAtMillis(): Long? = requestBudget.retryAtMillis()
+
         requestBudget.retryAtMillis()?.let { retryAt ->
+            publishRankedCandidates()
             return RowLoadOutcome(
-                manga = rankCandidates(),
+                manga = publishedCandidates.toList(),
                 complete = false,
                 retryAtMillis = retryAt,
             )
@@ -709,7 +632,7 @@ class MangaRecommendationRepository internal constructor(
 
         // With no content evidence, popular is the same pool for every target and is not a
         // similarity recommendation. Creator results are handled by their own row.
-        if (tagProfile.allTags.isEmpty() && aniListId == null && !hasQualifiedRelatedCandidates) {
+        if (tagProfile.allTags.isEmpty() && aniListId == null) {
             return RowLoadOutcome(
                 emptyList(),
                 complete = complete.get(),
@@ -730,13 +653,11 @@ class MangaRecommendationRepository internal constructor(
                 requestBudget = requestBudget,
                 onFailure = { complete.set(false) },
                 onRouteCompleted = {
-                    val partial = rankCandidates()
-                    if (partial.isNotEmpty()) onPartial(partial)
+                    publishRankedCandidates()
                 },
             )
         } else {
-            val requestCountBeforeStructuredFallback = requestBudget.requestCount()
-            val combinedCount = collectCombinedStructuredCandidates(
+            collectCombinedStructuredCandidates(
                 source = source,
                 targetGenreIdentities = tagProfile.routeIdentities,
                 documentFrequency = documentFrequency,
@@ -747,16 +668,10 @@ class MangaRecommendationRepository internal constructor(
                 requestBudget = requestBudget,
                 onFailure = { complete.set(false) },
                 onRouteCompleted = {
-                    val partial = rankCandidates()
-                    if (partial.isNotEmpty()) onPartial(partial)
+                    publishRankedCandidates()
                 },
             )
-            val structuredFallbackMadeRequest =
-                requestBudget.requestCount() > requestCountBeforeStructuredFallback
-            if (
-                combinedCount < MAX_DISPLAY_RESULTS &&
-                (!hasQualifiedRelatedCandidates || !structuredFallbackMadeRequest)
-            ) {
+            if (rankCandidates().size < MAX_DISPLAY_RESULTS) {
                 collectExactGenreCandidates(
                     source = source,
                     targetGenres = routeGenres,
@@ -766,22 +681,21 @@ class MangaRecommendationRepository internal constructor(
                     candidates = candidates,
                     currentUrl = currentUrl,
                     routeSeed = routingSeed,
-                    maxGenreRoutes = if (relatedTarget != null) 1 else MAX_GENRE_ROUTES,
+                    maxGenreRoutes = MAX_GENRE_ROUTES,
                     requestBudget = requestBudget,
                     onFailure = { complete.set(false) },
                     onRouteCompleted = {
-                        val partial = rankCandidates()
-                        if (partial.isNotEmpty()) onPartial(partial)
+                        publishRankedCandidates()
                     },
                 )
             }
         }
-        if (hasQualifiedRelatedCandidates) {
-            val filled = rankCandidates()
+        val firstFullBatch = rankCandidates()
+        if (firstFullBatch.size >= MAX_DISPLAY_RESULTS) {
+            publishRankedCandidates()
             return RowLoadOutcome(
-                manga = filled,
-                complete = filled.size >= MAX_DISPLAY_RESULTS || complete.get(),
-                retryAtMillis = retryAtMillis().takeIf { filled.size < MAX_DISPLAY_RESULTS },
+                manga = publishedCandidates.toList(),
+                complete = true,
             )
         }
         if (aniListId != null) {
@@ -808,68 +722,25 @@ class MangaRecommendationRepository internal constructor(
         }
         if (aniListId == null) {
             val reliableAfterExact = rankCandidates()
-            val hasRecentExposure = exposureSnapshot.recentKeys.isNotEmpty()
-            val tagQueryThreshold = if (hasRecentExposure) {
-                MIN_RESULTS_BEFORE_REPEAT_EXPANSION
-            } else {
-                MIN_RESULTS_BEFORE_TAG_QUERY
-            }
-            val popularThreshold = if (hasRecentExposure) {
-                MIN_RESULTS_BEFORE_REPEAT_EXPANSION
-            } else {
-                MIN_RESULTS_BEFORE_POPULAR
-            }
-            val popular = coroutineScope {
-                val tagQueryJob = launch {
-                    if (!isEhentai && reliableAfterExact.size < tagQueryThreshold) {
-                        collectTagQueryCandidates(
-                            source = source,
-                            targetGenres = routeGenres,
-                            targetGenreIdentities = tagProfile.routeIdentities,
-                            documentFrequency = documentFrequency,
-                            localByUrl = localByUrl,
-                            candidates = candidates,
-                            currentUrl = currentUrl,
-                            routeSeed = routingSeed,
-                            requestBudget = requestBudget,
-                            onFailure = { complete.set(false) },
-                        )
-                    }
-                }
-                val popularJob = async {
-                    if (
-                        reliableAfterExact.size < popularThreshold
-                    ) {
-                        loadPopularRoute(
-                            source = source,
-                            requestBudget = requestBudget,
-                            onFailure = { complete.set(false) },
-                            preferredPage = recommendationPage(
-                                targetKey = routingSeed,
-                                routeKey = "popular",
-                                maxPage = if (relatedTarget != null) 1 else 4,
-                            ),
-                        )
-                    } else {
-                        emptyList()
-                    }
-                }
-                tagQueryJob.join()
-                popularJob.await()
-            }
-            popular.take(MAX_CANDIDATES_PER_REQUEST).forEachIndexed { index, item ->
-                val resolved = localByUrl[recommendationKey(item)]
-                    ?.let { mergeIndexedMetadata(item, it) }
-                    ?: item
-                mergeCandidate(
+            // Do not pad a short, target-specific row with the source's generic popular pool.
+            // A broader tag query is still target-derived and its candidates require tag evidence.
+            if (!isEhentai && reliableAfterExact.size < MAX_DISPLAY_RESULTS) {
+                collectTagQueryCandidates(
+                    source = source,
+                    targetGenres = routeGenres,
+                    targetGenreIdentities = tagProfile.routeIdentities,
+                    documentFrequency = documentFrequency,
+                    localByUrl = localByUrl,
                     candidates = candidates,
-                    manga = resolved,
-                    evidence = CandidateEvidence(popularRank = index),
                     currentUrl = currentUrl,
-                    sourceId = source.id,
+                    routeSeed = routingSeed,
+                    requestBudget = requestBudget,
+                    onFailure = { complete.set(false) },
                 )
             }
         }
+
+        publishRankedCandidates()
 
         val hydrationComplete = hydrateSimilarCandidates(
             source = source,
@@ -880,10 +751,11 @@ class MangaRecommendationRepository internal constructor(
             onFailure = { complete.set(false) },
             forceRefresh = forceRefresh,
             onBatchCompleted = {
-                onPartial(rankCandidates())
+                publishRankedCandidates()
             },
         )
-        val filled = rankCandidates()
+        publishRankedCandidates()
+        val filled = publishedCandidates.toList()
         if (!hydrationComplete && filled.size < MAX_DISPLAY_RESULTS) complete.set(false)
         return RowLoadOutcome(
             manga = filled,
@@ -938,8 +810,10 @@ class MangaRecommendationRepository internal constructor(
                     routeKey = "ehentai:$query",
                     maxPage = 4,
                 ),
+                minimumCandidatePool = MIN_QUALITY_POOL_SIZE,
             )
             val queriedGenres = route.mapTo(linkedSetOf(), GenreIdentity::normalizedName)
+            var acceptedCount = 0
             results.take(MAX_CANDIDATES_PER_GENRE_ROUTE).forEachIndexed { index, item ->
                 val resolved = localByUrl[recommendationKey(item)]
                     ?.let { mergeIndexedMetadata(item, it) }
@@ -953,9 +827,10 @@ class MangaRecommendationRepository internal constructor(
                     ),
                     currentUrl = currentUrl,
                     sourceId = source.id,
-                )
+                )?.let { acceptedCount += 1 }
             }
             if (results.isNotEmpty()) onRouteCompleted()
+            if (acceptedCount >= MAX_DISPLAY_RESULTS) return
         }
     }
 
@@ -994,8 +869,9 @@ class MangaRecommendationRepository internal constructor(
             preferredPage = recommendationPage(
                 targetKey = routeSeed,
                 routeKey = "combined:${route.joinToString { it.normalizedName }}",
-                maxPage = if (requestBudget.isRateSensitive) 1 else 4,
+                maxPage = 4,
             ),
+            minimumCandidatePool = MIN_QUALITY_POOL_SIZE,
         )
         val routeGenres = route.mapTo(linkedSetOf(), GenreIdentity::normalizedName)
         val acceptedKeys = linkedSetOf<String>()
@@ -1126,8 +1002,9 @@ class MangaRecommendationRepository internal constructor(
                 preferredPage = recommendationPage(
                     targetKey = routeSeed,
                     routeKey = "genre:${identity.normalizedName}",
-                    maxPage = if (requestBudget.isRateSensitive || routeIndex > 0) 1 else 4,
+                    maxPage = if (routeIndex > 0) 1 else 4,
                 ),
+                minimumCandidatePool = MIN_QUALITY_POOL_SIZE.takeIf { strongEvidence } ?: 0,
             )
             val routeResults = results
                 .filter { item ->
@@ -1191,7 +1068,7 @@ class MangaRecommendationRepository internal constructor(
             preferredPage = recommendationPage(
                 targetKey = routeSeed,
                 routeKey = "query:${identity.normalizedName}",
-                maxPage = if (requestBudget.isRateSensitive) 1 else 4,
+                maxPage = 4,
             ),
         )
         results.take(MAX_CANDIDATES_PER_REQUEST)
@@ -1227,7 +1104,7 @@ class MangaRecommendationRepository internal constructor(
                 RecommendationMetadata.extractGenres(it.manga).isEmpty() &&
                     it.evidence.externalGenres.isEmpty() &&
                     it.evidence.strongRouteGenres.isEmpty() &&
-                    !it.evidence.hasAuthoritativeEvidence
+                    !it.evidence.hasAniListEvidence
             }
             .filterNot { recommendationKey(it.manga) in localByUrl }
             .sortedWith(
@@ -1354,6 +1231,7 @@ class MangaRecommendationRepository internal constructor(
         allowAfterSoftDeadline: Boolean = false,
         isTextFilterRoute: Boolean = false,
         preferredPage: Int = 1,
+        minimumCandidatePool: Int = 0,
     ): List<SManga> {
         if (isTextFilterRoute && !requestBudget.tryAcquireTextFilterRoute()) {
             onFailure()
@@ -1370,33 +1248,25 @@ class MangaRecommendationRepository internal constructor(
 
         val selectedPage = preferredPage.coerceAtLeast(1)
         val selected = load(selectedPage) ?: return emptyList()
-        if (selected.mangas.isNotEmpty() || selectedPage == 1) {
-            return selected.mangas.take(MAX_SOURCE_RESULT_SAMPLE)
+        if (selected.mangas.isEmpty() && selectedPage > 1) {
+            // A source may expose only its first page for a particular filter. Fall back once
+            // instead of spending two calls on every route and starving detail verification.
+            return load(1)?.mangas.orEmpty().take(MAX_SOURCE_RESULT_SAMPLE)
         }
-        // A source may expose only its first page for a particular filter. Fall back once instead
-        // of spending two calls on every route and starving the detail-verification budget.
-        return load(1)?.mangas.orEmpty().take(MAX_SOURCE_RESULT_SAMPLE)
-    }
-
-    private suspend fun loadPopularRoute(
-        source: Source,
-        requestBudget: SourceRequestBudget,
-        onFailure: () -> Unit,
-        preferredPage: Int = 1,
-    ): List<SManga> {
-        suspend fun load(pageNumber: Int) = requestBudget.call(
-            name = if (pageNumber == 1) "popular" else "popular-page-$pageNumber",
-            onFailure = onFailure,
+        if (
+            minimumCandidatePool <= 0 ||
+            selected.mangas.size >= minimumCandidatePool ||
+            !selected.hasNextPage
         ) {
-            source.getPopularManga(pageNumber)
-        }
-
-        val selectedPage = preferredPage.coerceAtLeast(1)
-        val selected = load(selectedPage) ?: return emptyList()
-        if (selected.mangas.isNotEmpty() || selectedPage == 1) {
             return selected.mangas.take(MAX_SOURCE_RESULT_SAMPLE)
         }
-        return load(1)?.mangas.orEmpty().take(MAX_SOURCE_RESULT_SAMPLE)
+
+        // Preserve recommendation quality by expanding the exact same route, never by mixing a
+        // broader tag or popular pool merely to reach the randomization target.
+        val next = load(selectedPage + 1)
+        return (selected.mangas + next?.mangas.orEmpty())
+            .distinctBy(::recommendationKey)
+            .take(MAX_SOURCE_RESULT_SAMPLE)
     }
 
     private fun recommendationPage(targetKey: String, routeKey: String, maxPage: Int): Int {
@@ -1644,18 +1514,19 @@ class MangaRecommendationRepository internal constructor(
         private val maxRequests: Int,
         private val semaphore: Semaphore,
         private val maxTextFilterRoutes: Int,
-        val isRateSensitive: Boolean,
         private val onRequest: (String) -> Unit,
         private val softDeadlineNanos: Long,
         private val monotonicNowNanos: () -> Long,
-        private val paceRequest: suspend () -> Unit,
-        private val isRateLimitedExternally: () -> Boolean,
+        private val nowMillis: () -> Long,
+        private val requestScheduler: RecommendationRequestScheduler,
+        private val sourceId: Long,
+        private val sourcePolicyProvider: (Long) -> RecommendationSourcePolicy,
         private val rateLimitRetryAt: () -> Long?,
-        private val onRateLimited: () -> Unit,
     ) {
         private val requests = AtomicInteger()
-        private val rateLimited = AtomicBoolean(false)
         private val textFilterRoutes = AtomicInteger()
+        private val rateLimitedThisRound = AtomicBoolean(false)
+        private val roundRetryAtMillis = AtomicLong(0L)
 
         fun tryAcquireTextFilterRoute(): Boolean {
             while (true) {
@@ -1665,13 +1536,7 @@ class MangaRecommendationRepository internal constructor(
             }
         }
 
-        fun stopCurrentRunForRateLimit() {
-            rateLimited.set(true)
-        }
-
-        fun retryAtMillis(): Long? = rateLimitRetryAt()
-
-        fun requestCount(): Int = requests.get()
+        fun retryAtMillis(): Long? = roundRetryAtMillis.get().takeIf { it > 0L } ?: rateLimitRetryAt()
 
         suspend fun <T> call(
             name: String,
@@ -1680,7 +1545,11 @@ class MangaRecommendationRepository internal constructor(
             allowAfterSoftDeadline: Boolean = false,
             block: suspend () -> T,
         ): T? {
-            if (rateLimitReached()) {
+            if (!sourcePolicyProvider(sourceId).enabled || rateLimitedThisRound.get()) {
+                onFailure()
+                return null
+            }
+            if (retryAtMillis() != null) {
                 onFailure()
                 return null
             }
@@ -1697,7 +1566,11 @@ class MangaRecommendationRepository internal constructor(
                 if (requests.compareAndSet(current, current + 1)) break
             }
             return semaphore.withPermit {
-                if (rateLimitReached()) {
+                if (!sourcePolicyProvider(sourceId).enabled || rateLimitedThisRound.get()) {
+                    onFailure()
+                    return@withPermit null
+                }
+                if (retryAtMillis() != null) {
                     onFailure()
                     return@withPermit null
                 }
@@ -1705,38 +1578,64 @@ class MangaRecommendationRepository internal constructor(
                     onFailure()
                     return@withPermit null
                 }
-                try {
-                    paceRequest()
-                    if (rateLimitReached()) {
+                val intervalMillis = sourcePolicyProvider(sourceId).minRequestIntervalMillis
+                requestScheduler.withRatePermit(
+                    sourceId = sourceId,
+                    minIntervalMillis = intervalMillis,
+                    monotonicNowNanos = monotonicNowNanos,
+                    nowMillis = nowMillis,
+                ) ratePermit@{
+                    if (
+                        !sourcePolicyProvider(sourceId).enabled ||
+                        rateLimitedThisRound.get() ||
+                        retryAtMillis() != null
+                    ) {
                         onFailure()
-                        return@withPermit null
+                        return@ratePermit null
                     }
-                    onRequest(name)
-                    withTimeoutOrNull(timeoutMillis) { block() }.also {
-                        if (it == null) onFailure()
+                    if (!allowAfterSoftDeadline && softDeadlineReached()) {
+                        onFailure()
+                        return@ratePermit null
                     }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    if (e.isRateLimited()) {
-                        rateLimited.set(true)
-                        onRateLimited()
+                    try {
+                        onRequest(name)
+                        withTimeoutOrNull(timeoutMillis) { block() }.also { result ->
+                            if (result == null) {
+                                onFailure()
+                            } else {
+                                if (!rateLimitedThisRound.get()) {
+                                    requestScheduler.recordSuccess(sourceId)
+                                }
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        if (
+                            e.isRecommendationRateLimited() &&
+                            rateLimitedThisRound.compareAndSet(false, true)
+                        ) {
+                            roundRetryAtMillis.set(
+                                requestScheduler.recordRateLimit(
+                                    sourceId = sourceId,
+                                    nowMillis = nowMillis(),
+                                    retryAfterMillis = e.recommendationRetryAfterMillis(nowMillis()),
+                                    serverRequestLimit = e.recommendationRateLimit(),
+                                ),
+                            )
+                            logcat(LogPriority.WARN, e) {
+                                "Recommendation source request received HTTP 429: $name"
+                            }
+                        }
+                        onFailure()
+                        logcat(LogPriority.DEBUG, e) { "Recommendation source request failed: $name" }
+                        null
                     }
-                    onFailure()
-                    logcat(LogPriority.DEBUG, e) { "Recommendation source request failed: $name" }
-                    null
                 }
             }
         }
 
         private fun softDeadlineReached(): Boolean = monotonicNowNanos() >= softDeadlineNanos
-
-        private fun rateLimitReached(): Boolean = rateLimited.get() || isRateLimitedExternally()
-
-        private fun Throwable.isRateLimited(): Boolean {
-            return generateSequence(this) { it.cause }
-                .any { cause -> cause is HttpException && cause.code == HTTP_TOO_MANY_REQUESTS }
-        }
     }
 
     private data class RowLoadOutcome(
@@ -1781,7 +1680,7 @@ class MangaRecommendationRepository internal constructor(
         private const val MAX_LOCAL_POOL = 200
         private const val MAX_INTERNAL_RESULTS = 40
         private const val MAX_DISPLAY_RESULTS = 10
-        private const val MAX_SAMPLED_RESULTS = 20
+        private const val MAX_SAMPLED_RESULTS = MAX_DISPLAY_RESULTS
         private const val MAX_CREATOR_SEARCHES = 2
         private const val MAX_GENRE_ROUTES = 2
         private val DEFERRED_FILTER_RETRY_DELAYS_MS = longArrayOf(75L, 150L)
@@ -1795,31 +1694,54 @@ class MangaRecommendationRepository internal constructor(
         private const val MAX_CANDIDATES_PER_REQUEST = 12
         private const val MAX_SOURCE_RESULT_SAMPLE = 36
         private const val MAX_SOURCE_REQUESTS = 12
-        private const val MAX_RATE_SENSITIVE_SOURCE_REQUESTS = 4
         private const val MAX_SOURCE_CONCURRENCY = 2
         private const val MAX_TEXT_FILTER_ROUTES = 4
-        private const val MAX_RATE_SENSITIVE_TEXT_FILTER_ROUTES = 2
         private const val MAX_CREATOR_ONLY_TEXT_FILTER_ROUTES = 2
-        private const val HTTP_TOO_MANY_REQUESTS = 429
         private const val EHENTAI_HOST = "e-hentai.org"
         private const val EXHENTAI_HOST = "exhentai.org"
-        private const val SOURCE_RATE_LIMIT_COOLDOWN_MS = 45_000L
-        private const val RATE_SENSITIVE_REQUEST_INTERVAL_MS = 1_000L
-
-        private const val MIN_RESULTS_BEFORE_TAG_QUERY = 6
-        private const val MIN_RESULTS_BEFORE_POPULAR = MAX_DISPLAY_RESULTS
-
-        // Once this source has displayed cards, ten candidates are not a healthy random pool.
-        // Expand only repeat-prone runs so the first result remains as fast as the original path.
-        private const val MIN_RESULTS_BEFORE_REPEAT_EXPANSION = MAX_SAMPLED_RESULTS
+        private const val MIN_QUALITY_POOL_SIZE = MAX_SAMPLED_RESULTS
         private const val MIN_ANILIST_TAG_RANK = 60
         private const val HARD_TIMEOUT_MS = 8_000L
+        private const val MAX_HARD_TIMEOUT_MS = 20_000L
         private const val SOFT_TIMEOUT_MS = 4_000L
         private const val EXTERNAL_TIMEOUT_MS = 4_000L
         private const val SOURCE_CALL_TIMEOUT_MS = 4_000L
         private const val TEXT_FILTER_SOURCE_CALL_TIMEOUT_MS = 6_000L
+        private const val PROGRESSIVE_CARD_INTERVAL_MS = 20L
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val DETAIL_CACHE_TTL_MS = 6 * 60 * 60 * 1000L
         private const val MAX_DETAIL_CACHE_ENTRIES = 512
     }
 }
+
+private fun Throwable.isRecommendationRateLimited(): Boolean =
+    generateSequence(this) { it.cause }
+        .any { cause -> cause is HttpException && cause.code == HTTP_TOO_MANY_REQUESTS }
+
+private fun Throwable.recommendationRetryAfterMillis(nowMillis: Long): Long? {
+    val value = generateSequence(this) { it.cause }
+        .filterIsInstance<HttpException>()
+        .firstOrNull { it.code == HTTP_TOO_MANY_REQUESTS }
+        ?.retryAfter
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: return null
+    value.toLongOrNull()?.let { seconds ->
+        if (seconds < 0L) return null
+        return seconds.coerceAtMost(Long.MAX_VALUE / 1_000L) * 1_000L
+    }
+    return runCatching {
+        val retryAt = ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME)
+            .toInstant()
+            .toEpochMilli()
+        (retryAt - Instant.ofEpochMilli(nowMillis).toEpochMilli()).coerceAtLeast(0L)
+    }.getOrNull()
+}
+
+private fun Throwable.recommendationRateLimit(): Int? =
+    generateSequence(this) { it.cause }
+        .filterIsInstance<HttpException>()
+        .firstOrNull { it.code == HTTP_TOO_MANY_REQUESTS }
+        ?.rateLimit
+
+private const val HTTP_TOO_MANY_REQUESTS = 429

@@ -15,6 +15,10 @@ import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.DownloadProvider
 import eu.kanade.tachiyomi.data.recommendation.MangaRecommendationRepository
+import eu.kanade.tachiyomi.data.recommendation.PreferenceRecommendationCooldownStore
+import eu.kanade.tachiyomi.data.recommendation.PreferenceRecommendationRateProfileStore
+import eu.kanade.tachiyomi.data.recommendation.RecommendationRequestScheduler
+import eu.kanade.tachiyomi.data.recommendation.RecommendationSourcePolicyStore
 import eu.kanade.tachiyomi.data.saver.ImageSaver
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.extension.ExtensionManager
@@ -28,6 +32,7 @@ import nl.adaptivity.xmlutil.core.XmlVersion
 import nl.adaptivity.xmlutil.serialization.DefaultXmlSerializationPolicy
 import nl.adaptivity.xmlutil.serialization.XML
 import nl.adaptivity.xmlutil.serialization.XmlConfig
+import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.storage.AndroidStorageFolderProvider
 import tachiyomi.data.Chapters
 import tachiyomi.data.Database
@@ -126,13 +131,21 @@ class AppModule(val app: Application) : InjektModule {
         addSingletonFactory { DownloadCache(app) }
 
         addSingletonFactory { TrackerManager() }
+        addSingletonFactory { RecommendationSourcePolicyStore(get<PreferenceStore>()) }
         addSingletonFactory {
             val trackerManager = get<TrackerManager>()
             val libraryPreferences = get<LibraryPreferences>()
+            val sourcePolicyStore = get<RecommendationSourcePolicyStore>()
+            val requestScheduler = RecommendationRequestScheduler(
+                cooldownStore = PreferenceRecommendationCooldownStore(get<PreferenceStore>()),
+                rateProfileStore = PreferenceRecommendationRateProfileStore(get<PreferenceStore>()),
+            )
             MangaRecommendationRepository(
                 localCandidateLoader = get<GetMangaRecommendationCandidates>()::await,
                 aniListLoader = trackerManager.aniList::getRecommendations,
                 recommendationFilterProvider = libraryPreferences.recommendationFilterKeywords::get,
+                requestScheduler = requestScheduler,
+                sourcePolicyProvider = sourcePolicyStore::get,
             )
         }
         addSingletonFactory { DelayedTrackingStore(app) }
