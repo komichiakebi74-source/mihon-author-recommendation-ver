@@ -53,6 +53,11 @@ Similar manga
 
 Chapter list
 ```
+<p align="center">
+<img width="30%" alt="a02f09db533941b74a014f973ec0e14a" src="https://github.com/user-attachments/assets/0e376816-e768-44af-a46d-6e26987c3849" />
+
+<img width="30%" alt="c066eb394c595d39ffb2fd51a5a7feef" src="https://github.com/user-attachments/assets/6ccbd283-f26a-4384-bdaf-270b1195b7ce" />
+</p>
 
 4. Select a recommendation to open it through the source of the current manga. A same-named entry from another source is never substituted.
 5. Re-entering or refreshing the page starts a new quality-weighted sample. When enough candidates are available, recently unseen works are preferred.
@@ -62,11 +67,14 @@ The recommendation keyword filter is available under:
 ```text
 More → Settings → Library → Recommendations → Filter recommendation keywords
 ```
+<p align="center">
+<img width="400" height="800" alt="beb3f017bf2b1eb884df7e3691187e1a" src="https://github.com/user-attachments/assets/89d2181d-cb92-4be0-b68b-fe5e54b91666" />
+</p>
 
 Separate multiple terms with commas or new lines. Matching is case-insensitive:
 
 ```text
-AI, AI-generated, AI生成, 3D
+AI,AI-generated,3D
 ```
 
 Per-source controls are available under:
@@ -138,8 +146,6 @@ Author, artist, and explicitly labeled group/circle names are normalized with Un
 When a search result lacks creator metadata, the repository may fetch details within its request budget and validate the result. An item that cannot be confirmed as sharing a creator is not allowed into the creator row.
 
 ### Multilingual tags and scoring
-
-Tags are mapped to internal semantic identities instead of comparing display strings directly. Known aliases such as `爱情`, `愛情`, `恋愛`, and `romance` can therefore participate in the same comparison. Unknown tags are retained conservatively as source-native identities, so compatibility does not depend on every source using a fixed vocabulary.
 
 Up to four core tags are selected for the target manga, while remaining tags provide secondary evidence. Content scoring is driven mainly by target-core-tag coverage and also considers core-tag Jaccard overlap and secondary-tag matches. A candidate with many extra tags is therefore not unfairly penalized simply for having a larger tag set.
 
