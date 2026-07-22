@@ -194,6 +194,10 @@ class MangaScreen(
                     )
                 }
             },
+            onRecommendedMangaLongClicked = { recommended ->
+                screenModel.addRecommendationToLibrary(recommended)
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            },
             onCoverClicked = screenModel::showCoverDialog,
             onShareClicked = { shareManga(context, screenModel.manga, screenModel.source) }.takeIf { isHttpSource },
             onDownloadActionClicked = screenModel::runDownloadAction.takeIf { !successState.source.isLocalOrStub() },
@@ -247,6 +251,21 @@ class MangaScreen(
                     onConfirm = { screenModel.toggleFavorite(onRemoved = {}, checkDuplicate = false) },
                     onOpenManga = { navigator.push(MangaScreen(it.id)) },
                     onMigrate = { screenModel.showMigrateDialog(it) },
+                )
+            }
+
+            is MangaScreenModel.Dialog.DuplicateRecommendationManga -> {
+                DuplicateMangaDialog(
+                    duplicates = dialog.duplicates,
+                    onDismissRequest = onDismissRequest,
+                    onConfirm = {
+                        screenModel.addRecommendationToLibrary(
+                            recommendation = dialog.manga,
+                            checkDuplicate = false,
+                        )
+                    },
+                    onOpenManga = { navigator.push(MangaScreen(it.id)) },
+                    onMigrate = { screenModel.showMigrateDialog(dialog.manga, it) },
                 )
             }
 

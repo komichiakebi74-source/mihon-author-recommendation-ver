@@ -26,6 +26,7 @@ fun MangaRecommendationRow(
     title: String,
     manga: List<Manga>,
     onMangaClick: (Manga) -> Unit,
+    onMangaLongClick: (Manga) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (manga.isEmpty()) return
@@ -64,7 +65,7 @@ fun MangaRecommendationRow(
                             1f
                         },
                         onClick = { onMangaClick(item) },
-                        onLongClick = {},
+                        onLongClick = { onMangaLongClick(item) },
                     )
                 }
             }

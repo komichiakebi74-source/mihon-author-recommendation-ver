@@ -59,6 +59,57 @@ class RecommendationRowStateTest {
         )
     }
 
+    @Test
+    fun `adding a recommendation updates its library badge without replacing card metadata`() {
+        val recommendation = manga("work").copy(title = "Fresh title", thumbnailUrl = "fresh-cover")
+        val libraryManga = manga("work").copy(
+            id = 99,
+            favorite = true,
+            dateAdded = 1234,
+            title = "Stored title",
+            thumbnailUrl = "stored-cover",
+        )
+
+        val state = RecommendationRowState.Success(listOf(recommendation))
+            .withLibraryManga(libraryManga) as RecommendationRowState.Success
+
+        assertEquals(99, state.manga.single().id)
+        assertTrue(state.manga.single().favorite)
+        assertEquals(1234, state.manga.single().dateAdded)
+        assertEquals("Fresh title", state.manga.single().title)
+        assertEquals("fresh-cover", state.manga.single().thumbnailUrl)
+    }
+
+    @Test
+    fun `adding a recommendation can match an existing local id with an alias url`() {
+        val recommendation = manga("alias-url").copy(id = 99)
+        val libraryManga = manga("canonical-url").copy(id = 99, favorite = true)
+
+        val state = RecommendationRowState.Success(listOf(recommendation))
+            .withLibraryManga(libraryManga) as RecommendationRowState.Success
+
+        assertTrue(state.manga.single().favorite)
+    }
+
+    @Test
+    fun `library badge updates remain isolated by source`() {
+        val recommendation = manga("work")
+        val otherSourceManga = manga("work").copy(source = 84, id = 99, favorite = true)
+
+        val state = RecommendationRowState.Success(listOf(recommendation))
+            .withLibraryManga(otherSourceManga) as RecommendationRowState.Success
+
+        assertFalse(state.manga.single().favorite)
+    }
+
+    @Test
+    fun `hidden recommendation row remains hidden after a library update`() {
+        assertSame(
+            RecommendationRowState.Hidden,
+            RecommendationRowState.Hidden.withLibraryManga(manga("work").copy(favorite = true)),
+        )
+    }
+
     private fun manga(url: String): Manga {
         return Manga.create().copy(
             source = 42,

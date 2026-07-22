@@ -103,6 +103,7 @@ fun MangaScreen(
     onContinueReading: () -> Unit,
     onSearch: (query: String, global: Boolean) -> Unit,
     onRecommendedMangaClicked: (Manga) -> Unit,
+    onRecommendedMangaLongClicked: (Manga) -> Unit,
 
     // For cover dialog
     onCoverClicked: () -> Unit,
@@ -157,6 +158,7 @@ fun MangaScreen(
             onContinueReading = onContinueReading,
             onSearch = onSearch,
             onRecommendedMangaClicked = onRecommendedMangaClicked,
+            onRecommendedMangaLongClicked = onRecommendedMangaLongClicked,
             onCoverClicked = onCoverClicked,
             onShareClicked = onShareClicked,
             onDownloadActionClicked = onDownloadActionClicked,
@@ -194,6 +196,7 @@ fun MangaScreen(
             onContinueReading = onContinueReading,
             onSearch = onSearch,
             onRecommendedMangaClicked = onRecommendedMangaClicked,
+            onRecommendedMangaLongClicked = onRecommendedMangaLongClicked,
             onCoverClicked = onCoverClicked,
             onShareClicked = onShareClicked,
             onDownloadActionClicked = onDownloadActionClicked,
@@ -237,6 +240,7 @@ private fun MangaScreenSmallImpl(
     onContinueReading: () -> Unit,
     onSearch: (query: String, global: Boolean) -> Unit,
     onRecommendedMangaClicked: (Manga) -> Unit,
+    onRecommendedMangaLongClicked: (Manga) -> Unit,
 
     // For cover dialog
     onCoverClicked: () -> Unit,
@@ -428,6 +432,7 @@ private fun MangaScreenSmallImpl(
                         creatorWorks = state.creatorWorks,
                         relatedManga = state.relatedManga,
                         onMangaClick = onRecommendedMangaClicked,
+                        onMangaLongClick = onRecommendedMangaLongClicked,
                     )
 
                     item(
@@ -486,6 +491,7 @@ fun MangaScreenLargeImpl(
     onContinueReading: () -> Unit,
     onSearch: (query: String, global: Boolean) -> Unit,
     onRecommendedMangaClicked: (Manga) -> Unit,
+    onRecommendedMangaLongClicked: (Manga) -> Unit,
 
     // For cover dialog
     onCoverClicked: () -> Unit,
@@ -672,6 +678,7 @@ fun MangaScreenLargeImpl(
                                 creatorWorks = state.creatorWorks,
                                 relatedManga = state.relatedManga,
                                 onMangaClick = onRecommendedMangaClicked,
+                                onMangaLongClick = onRecommendedMangaLongClicked,
                             )
 
                             item(
@@ -712,6 +719,7 @@ private fun LazyListScope.recommendationItems(
     creatorWorks: RecommendationRowState,
     relatedManga: RecommendationRowState,
     onMangaClick: (Manga) -> Unit,
+    onMangaLongClick: (Manga) -> Unit,
 ) {
     val creatorManga = (creatorWorks as? RecommendationRowState.Success)?.manga.orEmpty()
     if (creatorManga.isNotEmpty()) {
@@ -723,6 +731,7 @@ private fun LazyListScope.recommendationItems(
                 title = stringResource(MR.strings.manga_creator_works),
                 manga = creatorManga,
                 onMangaClick = onMangaClick,
+                onMangaLongClick = onMangaLongClick,
             )
         }
     }
@@ -737,6 +746,7 @@ private fun LazyListScope.recommendationItems(
                 title = stringResource(MR.strings.manga_similar_titles),
                 manga = similarManga,
                 onMangaClick = onMangaClick,
+                onMangaLongClick = onMangaLongClick,
             )
         }
     }

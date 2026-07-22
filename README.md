@@ -13,7 +13,7 @@ It adds **More by the same creators** and **Similar manga** rows above the chapt
 [![Upstream](https://img.shields.io/badge/upstream-Mihon-0877d2)](https://github.com/mihonapp/mihon)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](#installation)
 [![License](https://img.shields.io/badge/license-Apache--2.0-0877d2)](./LICENSE)
-[![Releases](https://img.shields.io/github/v/release/komichiakebi74-source/mihon-author-recommendation-ver?include_prereleases&label=download)](https://github.com/komichiakebi74-source/mihon-author-recommendation-ver/releases)
+[![Releases](https://img.shields.io/github/v/release/Kom1ch1/mihon-author-recommendation-ver?include_prereleases&label=download)](https://github.com/Kom1ch1/mihon-author-recommendation-ver/releases)
 
 </div>
 
@@ -32,6 +32,7 @@ It adds **More by the same creators** and **Similar manga** rows above the chapt
 - Uses source-scoped work identities to exclude the current manga, recently visited ancestors, cross-row duplicates, and alias URLs.
 - Includes a configurable recommendation keyword filter for titles, creators, tags, and descriptions.
 - Lets users disable recommendations or select a safe request rate independently for every installed online source.
+- Supports long-pressing a recommendation card to add it to the library with Mihon's normal duplicate and category handling.
 - Loads recommendations independently from manga details and chapters. Covers continue to use Mihon's native asynchronous image loading and cache.
 - Hides an individual row when the source does not expose enough reliable evidence, without showing loading, error, or retry placeholders.
 
@@ -60,7 +61,8 @@ Chapter list
 </p>
 
 4. Select a recommendation to open it through the source of the current manga. A same-named entry from another source is never substituted.
-5. Re-entering or refreshing the page starts a new quality-weighted sample. When enough candidates are available, recently unseen works are preferred.
+5. Long-press a recommendation card to add it to the library. Duplicate confirmation, category selection, enhanced tracker binding, haptic feedback, and the library badge use Mihon's native behavior.
+6. Re-entering or refreshing the page starts a new quality-weighted sample. When enough candidates are available, recently unseen works are preferred.
 
 The recommendation keyword filter is available under:
 
@@ -186,7 +188,7 @@ Recommendation count, latency, and quality depend on the metadata and search cap
 
 ## Installation
 
-Download the latest APK from [Releases](https://github.com/komichiakebi74-source/mihon-author-recommendation-ver/releases).
+Download the latest APK from [Releases](https://github.com/Kom1ch1/mihon-author-recommendation-ver/releases).
 
 - Requires Android 8.0 or newer.
 - Stable releases use the independent package name `app.mihon.recs` and the Mihon Recs project signing key.

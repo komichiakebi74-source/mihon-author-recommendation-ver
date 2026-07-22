@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   release:
-    if: github.repository == 'komichiakebi74-source/mihon-author-recommendation-ver'
+    if: github.repository == 'Kom1ch1/mihon-author-recommendation-ver'
     name: Build signed release
     runs-on: ubuntu-24.04
 

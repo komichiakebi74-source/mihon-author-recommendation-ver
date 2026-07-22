@@ -717,6 +717,104 @@ class MangaScreenModel(
         }
     }
 
+    fun addRecommendationToLibrary(
+        recommendation: Manga,
+        checkDuplicate: Boolean = true,
+    ) {
+        screenModelScope.launchIO {
+            val state = successState ?: return@launchIO
+            if (recommendation.source != state.source.id) {
+                logcat(LogPriority.WARN) {
+                    "Ignored cross-source recommendation library request: " +
+                        "expected=${state.source.id}, actual=${recommendation.source}"
+                }
+                return@launchIO
+            }
+
+            val persisted = persistRecommendationForNavigation(recommendation) ?: run {
+                showRecommendationAddError()
+                return@launchIO
+            }
+            val localManga = mangaRepository.getMangaById(persisted.id)
+            if (localManga.favorite) {
+                updateRecommendationLibraryState(localManga)
+                return@launchIO
+            }
+
+            if (checkDuplicate) {
+                val duplicates = getDuplicateLibraryManga(localManga)
+                if (duplicates.isNotEmpty()) {
+                    updateSuccessState {
+                        it.copy(dialog = Dialog.DuplicateRecommendationManga(localManga, duplicates))
+                    }
+                    return@launchIO
+                }
+            }
+
+            val categories = getCategories()
+            val defaultCategoryId = libraryPreferences.defaultCategory.get().toLong()
+            val defaultCategory = categories.find { it.id == defaultCategoryId }
+            when {
+                defaultCategory != null -> {
+                    addPersistedMangaToLibrary(localManga, listOf(defaultCategory.id), state.source)
+                }
+                defaultCategoryId == 0L || categories.isEmpty() -> {
+                    addPersistedMangaToLibrary(localManga, emptyList(), state.source)
+                }
+                else -> {
+                    val selection = getMangaCategoryIds(localManga)
+                    updateSuccessState {
+                        it.copy(
+                            dialog = Dialog.ChangeCategory(
+                                manga = localManga,
+                                initialSelection = categories.mapAsCheckboxState { category ->
+                                    category.id in selection
+                                },
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun addPersistedMangaToLibrary(
+        manga: Manga,
+        categoryIds: List<Long>,
+        source: Source,
+    ) {
+        setMangaDefaultChapterFlags.await(manga)
+        setMangaCategories.await(manga.id, categoryIds)
+        if (!updateManga.awaitUpdateFavorite(manga.id, true)) {
+            showRecommendationAddError()
+            return
+        }
+
+        val libraryManga = mangaRepository.getMangaById(manga.id)
+        updateRecommendationLibraryState(libraryManga)
+        screenModelScope.launch {
+            snackbarHostState.showSnackbar(context.stringResource(MR.strings.manga_added_library))
+        }
+        addTracks.bindEnhancedTrackers(libraryManga, source)
+    }
+
+    private fun updateRecommendationLibraryState(manga: Manga) {
+        updateSuccessState { state ->
+            state.copy(
+                manga = manga.takeIf { it.id == state.manga.id } ?: state.manga,
+                creatorWorks = state.creatorWorks.withLibraryManga(manga),
+                relatedManga = state.relatedManga.withLibraryManga(manga),
+                dialog = null,
+            )
+        }
+    }
+
+    private fun showRecommendationAddError() {
+        screenModelScope.launch {
+            snackbarHostState.showSnackbar(context.stringResource(MR.strings.internal_error))
+        }
+    }
+
     // Manga info - start
 
     fun toggleFavorite() {
@@ -872,11 +970,20 @@ class MangaScreenModel(
     }
 
     fun moveMangaToCategoriesAndAddToLibrary(manga: Manga, categories: List<Long>) {
-        moveMangaToCategory(categories)
-        if (manga.favorite) return
-
         screenModelScope.launchIO {
-            updateManga.awaitUpdateFavorite(manga.id, true)
+            if (manga.favorite) {
+                setMangaCategories.await(manga.id, categories)
+                return@launchIO
+            }
+
+            val state = successState ?: return@launchIO
+            if (manga.source != state.source.id) {
+                logcat(LogPriority.WARN) {
+                    "Ignored cross-source manga library request: expected=${state.source.id}, actual=${manga.source}"
+                }
+                return@launchIO
+            }
+            addPersistedMangaToLibrary(manga, categories, state.source)
         }
     }
 
@@ -1482,6 +1589,10 @@ class MangaScreenModel(
         ) : Dialog
         data class DeleteChapters(val chapters: List<Chapter>) : Dialog
         data class DuplicateManga(val manga: Manga, val duplicates: List<MangaWithChapterCount>) : Dialog
+        data class DuplicateRecommendationManga(
+            val manga: Manga,
+            val duplicates: List<MangaWithChapterCount>,
+        ) : Dialog
         data class Migrate(val target: Manga, val current: Manga) : Dialog
         data class SetFetchInterval(val manga: Manga) : Dialog
         data object SettingsSheet : Dialog
@@ -1511,7 +1622,11 @@ class MangaScreenModel(
 
     fun showMigrateDialog(duplicate: Manga) {
         val manga = successState?.manga ?: return
-        updateSuccessState { it.copy(dialog = Dialog.Migrate(target = manga, current = duplicate)) }
+        showMigrateDialog(manga, duplicate)
+    }
+
+    fun showMigrateDialog(target: Manga, duplicate: Manga) {
+        updateSuccessState { it.copy(dialog = Dialog.Migrate(target = target, current = duplicate)) }
     }
 
     fun setExcludedScanlators(excludedScanlators: Set<String>) {
@@ -1680,6 +1795,29 @@ internal fun Manga.toRecommendationMetadataUpdate(localId: Long): MangaUpdate? {
 sealed interface RecommendationRowState {
     data object Hidden : RecommendationRowState
     data class Success(val manga: List<Manga>) : RecommendationRowState
+}
+
+internal fun RecommendationRowState.withLibraryManga(libraryManga: Manga): RecommendationRowState {
+    if (this !is RecommendationRowState.Success) return this
+    return copy(
+        manga = manga.map { recommendation ->
+            val sameManga = recommendation.source == libraryManga.source &&
+                (
+                    recommendation.url == libraryManga.url ||
+                        (recommendation.id > 0L && recommendation.id == libraryManga.id)
+                    )
+            if (sameManga) {
+                recommendation.copy(
+                    id = libraryManga.id,
+                    favorite = libraryManga.favorite,
+                    dateAdded = libraryManga.dateAdded,
+                    favoriteModifiedAt = libraryManga.favoriteModifiedAt,
+                )
+            } else {
+                recommendation
+            }
+        },
+    )
 }
 
 private const val MAX_CREATOR_RECOMMENDATION_RESULTS = 10
